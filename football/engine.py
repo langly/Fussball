@@ -126,6 +126,8 @@ class Match:
                 dt=r.dt,
                 opponent_name=self.controllers[1 - team].name,
                 playing_at_home=(team == HOME),
+                squad_names=tuple(p.name for p in self.players if p.team == team),
+                opponent_names=tuple(p.name for p in self.players if p.team != team),
             )
             ctrl.on_match_start(info)
 

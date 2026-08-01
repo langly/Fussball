@@ -13,6 +13,7 @@ from dataclasses import replace
 from .config import Rules
 from .engine import AWAY, HOME, Match
 from .loader import BotError, load_controller
+from .sandbox import SandboxError, load_sandboxed
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,6 +31,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=1, help="RNG seed; the same seed replays identically")
     p.add_argument("--speed", type=float, default=1.0, help="initial playback speed multiplier")
     p.add_argument("--window", default="1400x900", help="window size, e.g. 1920x1080")
+    p.add_argument(
+        "--trusted", action="store_true",
+        help="run bots in-process with no sandbox. Faster and easier to debug, "
+             "but a team script can then do anything you can. Only for scripts you wrote.",
+    )
+    p.add_argument(
+        "--tick-timeout", type=float, default=None,
+        help="seconds a sandboxed bot may take per tick before it is killed (default 0.25)",
+    )
+    p.add_argument(
+        "--no-os-sandbox", action="store_true",
+        help="skip the OS sandbox profile (macOS sandbox-exec); process limits still apply",
+    )
     return p
 
 
@@ -55,6 +69,8 @@ def print_result(m: Match) -> None:
     for c in m.controllers:
         st = c.stats()
         flag = f"  ({st['errors']} errors)" if st["errors"] else ""
+        if st.get("killed"):
+            flag += f"  [SANDBOX KILLED: {st['killed']}]"
         print(f"    {st['name'][:24]:24s} think avg {st['avg_ms']:.3f} ms, worst {st['worst_ms']:.2f} ms{flag}")
 
 
@@ -62,19 +78,27 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     rules = make_rules(args)
 
+    squad = rules.outfield_players + 1
+
+    def make(path):
+        """Bots are sandboxed unless explicitly trusted."""
+        if args.trusted:
+            return load_controller(path, squad)
+        kw = {"os_sandbox": not args.no_os_sandbox}
+        if args.tick_timeout is not None:
+            kw["tick_timeout"] = args.tick_timeout
+        return load_sandboxed(path, squad, **kw)
+
     try:
-        squad = rules.outfield_players + 1
-        home = load_controller(args.home, squad)
-        away = load_controller(args.away, squad)
-    except BotError as exc:
+        home = make(args.home)
+        away = make(args.away)
+    except (BotError, SandboxError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
     def factory(seed: int) -> Match:
         # reload keeps repeated matches independent of leftover bot state
-        h = load_controller(args.home, squad)
-        a = load_controller(args.away, squad)
-        return Match(h, a, rules, seed=seed)
+        return Match(make(args.home), make(args.away), rules, seed=seed)
 
     if args.matches > 1 or args.headless:
         wins = [0, 0, 0]  # home, away, draw

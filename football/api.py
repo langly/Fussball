@@ -22,6 +22,7 @@ so the same script plays identically at home or away.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Mapping, Sequence
 
@@ -195,6 +196,8 @@ class MatchInfo:
     dt: float
     opponent_name: str
     playing_at_home: bool
+    squad_names: tuple[str, ...] = ()
+    opponent_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,18 +376,39 @@ class Action:
         return self
 
     def sanitized(self) -> "Action":
-        self.move = self.move.clamped(1.0)
+        # NaN and infinity must be scrubbed before anything else: every
+        # comparison against NaN is False, so it slips through clamping and
+        # then poisons the physics -- and collision resolution spreads it from
+        # one player to every other player on the pitch, including opponents.
+        self.move = _finite_vec(self.move).clamped(1.0)
         self.kick_power = _clamp01(self.kick_power)
         if self.kick is not None:
-            k = self.kick.normalized()
+            k = _finite_vec(self.kick).normalized()
             self.kick = k if k.length_sq() > 0 else None
         if self.kick is None:
             self.kick_power = 0.0
+        self.sprint = bool(self.sprint)
+        self.catch = bool(self.catch)
         return self
 
 
 def _clamp01(v: float) -> float:
-    return 0.0 if v < 0.0 else 1.0 if v > 1.0 else float(v)
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(f):
+        return 0.0
+    return 0.0 if f < 0.0 else 1.0 if f > 1.0 else f
+
+
+def _finite_vec(v: Vec2) -> Vec2:
+    """Replace a vector with zero unless both components are real numbers."""
+    try:
+        x, y = float(v.x), float(v.y)
+    except (AttributeError, TypeError, ValueError):
+        return Vec2()
+    return Vec2(x, y) if math.isfinite(x) and math.isfinite(y) else Vec2()
 
 
 # ---------------------------------------------------------------------------
