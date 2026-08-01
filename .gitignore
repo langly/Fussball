@@ -1,0 +1,32 @@
+# Byte-compiled Python
+__pycache__/
+*.py[cod]
+
+# Packaging artefacts
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+# (a venv created by `python -m venv` also self-ignores via .venv/.gitignore,
+# but name it here too in case the environment was made another way)
+.venv/
+venv/
+env/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editors
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# macOS
+.DS_Store

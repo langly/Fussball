@@ -1,0 +1,18 @@
+# fussball -- a 2D five-a-side football simulator driven by Python scripts.
+#
+# Requires Python 3.10 or newer (the code uses dataclasses with slots=True).
+# Developed and tested on Python 3.13.14 with pygame-ce 2.5.7.
+#
+#   python3 -m venv .venv
+#   .venv/bin/pip install -r requirements.txt
+#
+# Only the viewer needs pygame. The simulation, the bot API and the headless
+# and batch modes (--headless, --matches) use the standard library alone, so if
+# you only ever run matches without a window you can skip this install:
+#
+#   python3 -m football bots/chaser.py bots/tactician.py --headless
+#
+# Note: pygame-ce is a drop-in fork of pygame and installs the same `pygame`
+# module. Do not install both into one environment -- they will clash.
+
+pygame-ce>=2.4,<3
