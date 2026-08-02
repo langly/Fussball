@@ -31,7 +31,18 @@ from panda3d.core import (
 )
 
 from .engine import AWAY, HOME, Match
-from .render import GRASS_A, TEAM_COLORS, render_pitch_surface
+from .render import (
+    GRASS_A, HAIR_TONES, SKIN_TONES, TEAM_COLORS, NamePlateTracker,
+    render_pitch_surface,
+)
+
+
+def _appearance(p):
+    """Same stable per-player skin and hair the 2D view uses."""
+    h = p.team * 7 + p.index * 13
+    skin = SKIN_TONES[h % len(SKIN_TONES)]
+    hair = HAIR_TONES[(h // 3) % len(HAIR_TONES)]
+    return _rgb01(skin), _rgb01(hair)
 
 PITCH_TEXTURE_PX_PER_M = 12.0
 SKY = (0.42, 0.60, 0.80, 1.0)
@@ -117,6 +128,31 @@ def _make_cylinder(radius: float = 1.0, height: float = 1.0, segments: int = 16)
     return NodePath(node)
 
 
+def _limb(pivot: NodePath, radius: float, length: float, material: Material,
+          taper: float = 1.0) -> NodePath:
+    """A limb segment hanging *down* from `pivot`, so rotating the pivot swings it.
+
+    Geometry runs 0..+Z, so it is dropped by its own length to hang below the
+    joint. `taper` narrows it towards the far end, which reads far better than
+    a plain tube at this scale.
+    """
+    seg = _make_cylinder(radius, length, 10)
+    seg.reparentTo(pivot)
+    seg.setZ(-length)
+    seg.setSx(taper)
+    seg.setSy(taper)
+    seg.setMaterial(material, 1)
+    return seg
+
+
+def _joint(parent: NodePath, radius: float, material: Material) -> NodePath:
+    """A small sphere at a joint, so knees and elbows do not look snapped off."""
+    ball = _make_sphere(radius, 10, 8)
+    ball.reparentTo(parent)
+    ball.setMaterial(material, 1)
+    return ball
+
+
 def _material(rgb, shininess: float = 18.0, ambient: float = 0.42) -> Material:
     m = Material()
     m.setDiffuse(Vec4(rgb[0], rgb[1], rgb[2], 1.0))
@@ -128,6 +164,174 @@ def _material(rgb, shininess: float = 18.0, ambient: float = 0.42) -> Material:
 
 def _rgb01(c) -> tuple[float, float, float]:
     return (c[0] / 255.0, c[1] / 255.0, c[2] / 255.0)
+
+
+#: Procedural hair, so a squad does not look like clones. Chosen per player.
+HAIR_STYLES = ("crop", "afro", "mohawk", "ponytail", "swept", "bald", "topknot", "flattop")
+
+
+def _build_hair(head: NodePath, style: str, hair: Material, radius: float) -> None:
+    """Attach one of several hairstyles to a head of the given radius.
+
+    Each piece takes the hair material as it is made -- sweeping the head's
+    children afterwards would also catch the eyes and paint them hair-coloured.
+    """
+
+    def piece(r: float, scale, pos, segments: int = 12) -> None:
+        np_ = _make_sphere(radius * r, segments, max(6, segments - 4))
+        np_.reparentTo(head)
+        np_.setScale(*scale)
+        np_.setPos(*pos)
+        np_.setMaterial(hair, 1)
+
+    if style == "bald":
+        return
+    if style == "crop":
+        piece(1.02, (1.0, 1.0, 0.55), (0, 0, radius * 0.36), 14)
+    elif style == "flattop":
+        piece(1.00, (1.0, 1.0, 0.34), (0, 0, radius * 0.58), 14)
+    elif style == "afro":
+        piece(1.26, (1.0, 1.0, 0.86), (0, 0, radius * 0.30), 16)
+    elif style == "swept":
+        piece(1.04, (1.0, 1.12, 0.50), (0, -radius * 0.12, radius * 0.38), 14)
+    elif style == "mohawk":
+        for i in range(5):
+            t = (i / 4.0 - 0.5) * 2.0
+            piece(0.22, (0.5, 1.0, 2.9 - abs(t) * 1.4), (0, -t * radius * 0.60, radius * 0.92), 8)
+    elif style == "ponytail":
+        piece(1.02, (1.0, 1.0, 0.50), (0, 0, radius * 0.40), 14)
+        piece(0.30, (0.8, 1.7, 0.8), (0, -radius * 1.02, radius * 0.10), 10)
+    elif style == "topknot":
+        piece(1.02, (1.0, 1.0, 0.48), (0, 0, radius * 0.42), 14)
+        piece(0.30, (1.0, 1.0, 1.0), (0, -radius * 0.12, radius * 0.98), 10)
+
+
+class PlayerRig:
+    """A stylised player, animated procedurally.
+
+    Deliberately cartoon proportions -- an oversized head on a small body --
+    rather than realistic ones. At the scale a match is actually watched from,
+    a big head is what makes a player readable at all: it carries the skin
+    tone, the hairstyle and the eyes that show which way they are facing.
+
+    There is no rigged humanoid to load (Panda bundles only primitives and an
+    animated panda), so the figure is built from jointed parts and driven by a
+    run cycle keyed to `Player.distance_run` -- the same quantity the 2D sprite
+    uses, so the stride stays in step with real ground speed.
+    """
+
+    HIP_H = 0.74
+    SHOULDER_H = 1.16
+    HEAD_R = 0.33
+    STRIDE_M = 1.7  # metres per full cycle
+
+    def __init__(self, render: NodePath, player, skin_rgb, hair_rgb) -> None:
+        colors = TEAM_COLORS[player.team]
+        shirt = _material(_rgb01(colors["keeper"] if player.is_keeper else colors["body"]), 26.0)
+        shorts = _material(_rgb01(colors["keeper_shorts"] if player.is_keeper else colors["shorts"]), 26.0)
+        skin = _material(skin_rgb, 22.0)
+        hair = _material(hair_rgb, shininess=8.0)
+        boot = _material((0.11, 0.11, 0.13), shininess=55.0)
+        eye = _material((0.09, 0.09, 0.11), shininess=70.0)
+
+        self.root = render.attachNewNode(f"p{player.team}{player.index}")
+        self.body = self.root.attachNewNode("body")  # carries the forward lean
+        self.hips = self.body.attachNewNode("hips")
+        self.hips.setZ(self.HIP_H)
+
+        torso_h = self.SHOULDER_H - self.HIP_H
+        torso = _make_cylinder(0.19, torso_h, 14)
+        torso.reparentTo(self.hips)
+        torso.setSy(0.82)
+        torso.setMaterial(shirt, 1)
+        for z in (0.0, torso_h):  # round the shirt off at both ends
+            cap = _joint(self.hips, 0.19, shirt)
+            cap.setPos(0, 0, z)
+            cap.setSy(0.82)
+
+        self.hip_j, self.knee_j = {}, {}
+        self.shoulder_j, self.elbow_j = {}, {}
+        for side in (-1, 1):
+            hip = self.hips.attachNewNode(f"hip{side}")
+            hip.setPos(0.10 * side, 0, 0.02)
+            _limb(hip, 0.082, 0.36, shorts, taper=0.95)
+            knee = hip.attachNewNode("knee")
+            knee.setZ(-0.36)
+            _joint(knee, 0.078, skin)
+            _limb(knee, 0.072, 0.36, skin, taper=0.92)
+            # chunky rounded boot, not a flat slab
+            foot = _make_sphere(0.10, 12, 8)
+            foot.reparentTo(knee)
+            foot.setScale(0.85, 2.0, 0.80)
+            foot.setPos(0, 0.09, -0.40)
+            foot.setMaterial(boot, 1)
+            self.hip_j[side], self.knee_j[side] = hip, knee
+
+            shoulder = self.hips.attachNewNode(f"sh{side}")
+            shoulder.setPos(0.21 * side, 0, torso_h - 0.05)
+            _joint(shoulder, 0.085, shirt)
+            _limb(shoulder, 0.070, 0.26, shirt, taper=0.92)
+            elbow = shoulder.attachNewNode("elbow")
+            elbow.setZ(-0.26)
+            _joint(elbow, 0.066, skin)
+            _limb(elbow, 0.060, 0.24, skin, taper=0.9)
+            mitt = _joint(elbow, 0.088, skin)  # rounded fist
+            mitt.setZ(-0.26)
+            self.shoulder_j[side], self.elbow_j[side] = shoulder, elbow
+
+        self.head = self.hips.attachNewNode("head")
+        self.head.setZ(torso_h + self.HEAD_R * 0.86)
+        skull = _make_sphere(self.HEAD_R, 20, 16)
+        skull.reparentTo(self.head)
+        skull.setMaterial(skin, 1)
+        # Eyes on the front face. They double as the clearest possible cue for
+        # which way a player is turned.
+        for side in (-1, 1):
+            e = _make_sphere(self.HEAD_R * 0.17, 10, 8)
+            e.reparentTo(self.head)
+            e.setScale(0.85, 0.55, 1.15)
+            e.setPos(side * self.HEAD_R * 0.34, self.HEAD_R * 0.90, self.HEAD_R * 0.10)
+            e.setMaterial(eye, 1)
+        self.hair_style = HAIR_STYLES[(player.team * 5 + player.index * 7) % len(HAIR_STYLES)]
+        _build_hair(self.head, self.hair_style, hair, self.HEAD_R)
+
+        self.label = None
+        self.shadow = None
+
+    def update(self, p, rules, dt: float) -> None:
+        speed = p.vel.length()
+        amp = min(1.0, speed / rules.run_speed)
+        phase = p.distance_run * (2.0 * math.pi / self.STRIDE_M)
+        swing = math.sin(phase)
+
+        self.root.setPos(p.pos.x, p.pos.y, 0.0)
+        self.root.setH(math.degrees(math.atan2(p.heading.y, p.heading.x)) - 90.0)
+        # lean into the run, and bob on every half stride
+        self.body.setP(amp * 9.0)
+        self.hips.setZ(self.HIP_H + abs(math.sin(phase * 2.0)) * 0.035 * amp)
+
+        # A fresh kick leaves kick_cd at its maximum, so it doubles as the
+        # progress of a kick animation without the engine knowing about it.
+        kick = max(0.0, p.kick_cd / rules.kick_cooldown) if rules.kick_cooldown else 0.0
+
+        for side in (-1, 1):
+            leg = swing * side
+            self.hip_j[side].setP(leg * 44.0 * amp)
+            # The trailing leg bends, the leading one straightens. The sign
+            # matters: a knee folds the shin *backwards* (heel toward the
+            # backside). Bending it the other way gives a bird's reverse joint
+            # and the whole stride reads as running backwards.
+            self.knee_j[side].setP(-max(0.0, -leg) * 62.0 * amp)
+            self.shoulder_j[side].setP(-leg * 34.0 * amp - 6.0)
+            # elbows fold the forearm forwards, again the opposite sign to knees
+            self.elbow_j[side].setP(28.0 * amp + 8.0)
+
+        if kick > 0.02:
+            # right leg drives through, left plants
+            self.hip_j[1].setP(75.0 * kick)   # driving leg swings through, forwards
+            self.knee_j[1].setP(-10.0 * kick)
+            self.shoulder_j[-1].setP(50.0 * kick)
+            self.body.setP(amp * 9.0 - 8.0 * kick)  # rock back over the strike
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +358,7 @@ class Viewer3D:
         self.camera_mode = camera
         self.orbit = [0.0, -22.0, 120.0]  # heading, pitch, distance
         self._accum = 0.0
+        self._plate = NamePlateTracker()
 
         self.base.setBackgroundColor(*SKY)
         self.base.disableMouse()
@@ -180,12 +385,24 @@ class Viewer3D:
         apron.setZ(-0.02)
         apron.setMaterial(_material([c * 0.72 / 255.0 for c in GRASS_A]), 1)
 
+        self._build_stadium(r)
         self._build_goals(r)
         self._build_players(r)
 
-        self.ball = _make_sphere(r.ball_radius * 2.4, 20, 14)
+        ball_r = r.ball_radius * 2.4  # exaggerated, as in the 2D view
+        self.ball = _make_sphere(ball_r, 22, 16)
         self.ball.reparentTo(render)
-        self.ball.setMaterial(_material((0.96, 0.96, 0.96), 60.0), 1)
+        self.ball.setMaterial(_material((0.97, 0.97, 0.97), 70.0), 1)
+        # dark panels, so the spin below is actually visible
+        dark = _material((0.13, 0.14, 0.17), 55.0)
+        for hx, hy, hz in ((0, 0, 1), (0, 0, -1), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0)):
+            patch = _make_sphere(ball_r * 0.42, 8, 6)
+            patch.reparentTo(self.ball)
+            patch.setPos(hx * ball_r * 0.86, hy * ball_r * 0.86, hz * ball_r * 0.86)
+            patch.setMaterial(dark, 1)
+        self.ball.flattenStrong()  # patches ride along with the ball's rotation
+        self._ball_roll = 0.0
+        self._last_ball_pos = self.match.ball.pos
 
         # A blob on the turf under the ball -- with real height in the sim,
         # this is what tells you how high a lofted ball actually is.
@@ -236,6 +453,60 @@ class Viewer3D:
         np_.setZ(0.015)
         return np_
 
+    def _box(self, size, pos, material, parent: NodePath | None = None) -> NodePath:
+        """A unit box from Panda's bundled models, scaled into place.
+
+        `models/box` is used rather than a generated cube because it is one of
+        the few bundled models that actually carries normals.
+        """
+        np_ = self.base.loader.loadModel("models/box")
+        np_.reparentTo(parent if parent is not None else self.base.render)
+        np_.setTextureOff(1)  # it ships with a noisy placeholder texture
+        np_.setScale(*size)
+        np_.setPos(*pos)
+        np_.setMaterial(material, 1)
+        return np_
+
+    def _build_stadium(self, r) -> None:
+        """Raked terraces around the pitch, so it does not float in a void."""
+        stadium = self.base.render.attachNewNode("stadium")
+        gap = 7.0  # run-off between the touchline and the first step
+        steps, rise, tread = 7, 1.5, 2.4
+        concrete = _material((0.52, 0.53, 0.56), 6.0)
+        seats = (_material((0.20, 0.32, 0.62), 8.0), _material((0.72, 0.25, 0.22), 8.0))
+
+        for i in range(steps):
+            h = (i + 1) * rise
+            out = gap + i * tread
+            mat = seats[i % 2] if i else concrete
+            # long sides, running the length of the pitch
+            span = r.length + 2 * (out + tread)
+            self._box((span, tread, h), (-(out + tread), -out - tread, 0), mat, stadium)
+            self._box((span, tread, h), (-(out + tread), r.width + out, 0), mat, stadium)
+            # ends, behind each goal
+            depth = r.width + 2 * (out + tread)
+            self._box((tread, depth, h), (-out - tread, -(out + tread), 0), mat, stadium)
+            self._box((tread, depth, h), (r.length + out, -(out + tread), 0), mat, stadium)
+
+        # floodlight pylons at the corners
+        steel = _material((0.34, 0.36, 0.40), 30.0)
+        lamp = _material((1.0, 0.98, 0.88), 90.0)
+        reach = gap + steps * tread + 3.0
+        for cx in (-reach, r.length + reach):
+            for cy in (-reach, r.width + reach):
+                mast = _make_cylinder(0.5, 26.0, 10)
+                mast.reparentTo(self.base.render)
+                mast.setPos(cx, cy, 0)
+                mast.setMaterial(steel, 1)
+                mast.reparentTo(stadium)
+                head = self._box((6.0, 1.2, 3.0), (cx - 3.0, cy - 0.6, 26.0), lamp, stadium)
+                head.setLightOff()
+
+        # None of this ever moves, so collapse it into as few draw calls as
+        # possible -- unflattened it costs more than the entire rest of the
+        # scene (measured: 42 fps before, ~10x that after).
+        stadium.flattenStrong()
+
     def _build_goals(self, r) -> None:
         white = _material((0.95, 0.95, 0.96), 40.0)
         bar = r.crossbar_height
@@ -285,46 +556,24 @@ class Viewer3D:
             panel.setLightOff()
 
     def _build_players(self, r) -> None:
-        self.player_nodes = []
+        self.rigs = []
         for p in self.match.players:
-            colors = TEAM_COLORS[p.team]
-            shirt = _rgb01(colors["keeper"] if p.is_keeper else colors["body"])
-            shorts = _rgb01(colors["keeper_shorts"] if p.is_keeper else colors["shorts"])
-
-            root = self.base.render.attachNewNode(f"player{p.team}{p.index}")
-            legs = _make_cylinder(0.20, 0.85, 10)
-            legs.reparentTo(root)
-            legs.setMaterial(_material(shorts), 1)
-            torso = _make_cylinder(0.32, 0.75, 12)
-            torso.reparentTo(root)
-            torso.setZ(0.85)
-            torso.setMaterial(_material(shirt), 1)
-            head = _make_sphere(0.16, 14, 10)
-            head.reparentTo(root)
-            head.setZ(1.78)
-            head.setMaterial(_material((0.85, 0.68, 0.54)), 1)
-            # a stub facing forward, so you can read which way a player is turned
-            nose = _make_cylinder(0.07, 0.22, 8)
-            nose.reparentTo(root)
-            nose.setPos(0, 0.16, 1.74)
-            nose.setHpr(0, 90, 0)
-            nose.setMaterial(_material((0.95, 0.95, 0.95)), 1)
+            skin, hair = _appearance(p)
+            rig = PlayerRig(self.base.render, p, skin, hair)
 
             label = TextNode(f"num{p.team}{p.index}")
             label.setText(str(p.index))
             label.setAlign(TextNode.ACenter)
             label.setTextColor(1, 1, 1, 1)
-            label_np = root.attachNewNode(label)
-            label_np.setScale(0.55)
-            label_np.setZ(2.35)
+            label_np = rig.root.attachNewNode(label)
+            label_np.setScale(0.5)
+            label_np.setZ(2.3)
             label_np.setBillboardPointEye()
             label_np.setLightOff()
             label_np.hide()
-
-            self.player_nodes.append({
-                "root": root, "legs": legs, "label": label_np,
-                "shadow": self._make_shadow(0.42),
-            })
+            rig.label = label_np
+            rig.shadow = self._make_shadow(0.40)
+            self.rigs.append(rig)
 
     # -- hud -----------------------------------------------------------
     def _build_hud(self) -> None:
@@ -346,11 +595,18 @@ class Viewer3D:
         self.name_plate.setAlign(TextNode.ACenter)
         self.name_plate.setTextColor(1, 1, 1, 1)
         self.name_plate.setCardColor(0, 0, 0, 0.55)
-        self.name_plate.setCardAsMargin(0.3, 0.3, 0.15, 0.15)
+        self.name_plate.setCardAsMargin(0.25, 0.25, 0.12, 0.12)
+        # Without this the card and the glyphs sit on the same plane and
+        # z-fight, which hides the name inside its own box. Decal mode pushes
+        # the card behind the text instead.
+        self.name_plate.setCardDecal(True)
         self.name_np = self.base.render.attachNewNode(self.name_plate)
-        self.name_np.setScale(0.9)
+        self.name_np.setScale(0.62)
         self.name_np.setBillboardPointEye()
         self.name_np.setLightOff()
+        self.name_np.setTransparency(TransparencyAttrib.MAlpha)
+        self.name_np.setDepthWrite(False)
+        self.name_np.setBin("fixed", 40)
         self.name_np.hide()
 
     # -- input ---------------------------------------------------------
@@ -379,11 +635,13 @@ class Viewer3D:
 
     def _toggle_debug(self):
         self.debug = not self.debug
-        for node in self.player_nodes:
-            node["label"].show() if self.debug else node["label"].hide()
+        for rig in self.rigs:
+            rig.label.show() if self.debug else rig.label.hide()
 
     def _restart(self):
         self.match = self.match_factory()
+        self._last_ball_pos = self.match.ball.pos
+        self._plate.reset()  # drop the stale reference into the old match
 
     def _faster(self):
         self.speed = min(16.0, self.speed * 2.0)
@@ -403,7 +661,7 @@ class Viewer3D:
 
         dt = ClockObject.getGlobalClock().getDt()
         self._step_sim(dt)
-        self._sync_scene()
+        self._sync_scene(dt)
         self._move_camera(dt)
         self._update_hud()
         return Task.cont
@@ -423,32 +681,48 @@ class Viewer3D:
                 self._accum = 0.0
                 break
 
-    def _sync_scene(self) -> None:
+    def _sync_scene(self, dt: float = 0.0) -> None:
         m = self.match
-        for p, node in zip(m.players, self.player_nodes):
-            node["root"].setPos(p.pos.x, p.pos.y, 0)
-            node["root"].setH(math.degrees(math.atan2(p.heading.y, p.heading.x)) - 90.0)
-            node["shadow"].setPos(p.pos.x, p.pos.y, 0.015)
-            # legs bob on the stride cycle the 2D sprite already uses
-            swing = math.sin(p.distance_run * (2.0 * math.pi / 1.7))
-            amp = min(1.0, p.vel.length() / m.rules.run_speed)
-            node["legs"].setZ(abs(swing) * amp * 0.09)
+        for p, rig in zip(m.players, self.rigs):
+            rig.update(p, m.rules, dt)
+            rig.shadow.setPos(p.pos.x, p.pos.y, 0.015)
 
         b = m.ball
         self.ball.setPos(b.pos.x, b.pos.y, b.z + m.rules.ball_radius)
+        self._spin_ball(b, m.rules)
         self.ball_shadow.setPos(b.pos.x, b.pos.y, 0.02)
         # the shadow shrinks and fades as the ball climbs
         k = max(0.35, 1.0 - b.z / 12.0)
         self.ball_shadow.setScale(k)
         self.ball_shadow.setColor(0, 0, 0, 0.32 * k)
 
-        owner = m.owner
-        if owner is None:
+        # Follows the last toucher with a linger, not just the current owner:
+        # keepers hold the ball for seconds and outfielders for a fraction of
+        # one, so captioning `owner` alone names almost nobody but the keeper.
+        carrier, alpha = self._plate.update(m)
+        if carrier is None:
             self.name_np.hide()
         else:
-            self.name_plate.setText(owner.name)
-            self.name_np.setPos(owner.pos.x, owner.pos.y, 2.9)
+            self.name_plate.setText(carrier.name)
+            self.name_np.setPos(carrier.pos.x, carrier.pos.y, 2.15)
+            self.name_plate.setTextColor(1, 1, 1, alpha)
+            self.name_plate.setCardColor(0, 0, 0, 0.55 * alpha)
             self.name_np.show()
+
+    def _spin_ball(self, b, rules) -> None:
+        """Roll the ball by the distance it has travelled.
+
+        Without this a moving ball reads as a sliding dot; the panels make the
+        rotation visible, which is most of what sells the ball as a ball.
+        """
+        moved = b.pos.dist(self._last_ball_pos)
+        self._last_ball_pos = b.pos
+        speed = b.vel.length()
+        if speed > 0.05:
+            circumference = 2.0 * math.pi * max(rules.ball_radius, 0.01)
+            self._ball_roll = (self._ball_roll + (moved / circumference) * 360.0) % 360.0
+            heading = math.degrees(math.atan2(b.vel.y, b.vel.x)) - 90.0
+            self.ball.setHpr(heading, self._ball_roll, 0.0)
 
     def _move_camera(self, dt: float) -> None:
         m = self.match

@@ -48,6 +48,10 @@ class Rules:
     stamina_speed_floor: float = 0.70  # speed factor at zero stamina
     stumble_seconds: float = 0.45  # slowdown after losing a tackle
     stumble_speed_factor: float = 0.40
+    # How quickly a player who is standing still turns to face the ball. Without
+    # this their heading freezes wherever they last ran, so idle players end up
+    # all staring the same way.
+    idle_turn_rate: float = 6.0  # radians per second, so a full turn takes ~0.5 s
 
     # --- ball ---------------------------------------------------------
     ball_radius: float = 0.11

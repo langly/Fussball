@@ -69,6 +69,48 @@ HAIR_TONES = (
 SOCK_DARK = (28, 30, 36)
 
 
+class NamePlateTracker:
+    """Decides whose name to caption, and how opaque the plate should be.
+
+    Possession alone is far too fleeting to read: an outfielder holds the ball
+    for well under a second, while a keeper can sit on it for the full six. So
+    following `match.owner` alone captions almost nothing but the goalkeeper.
+    This follows the last player to *touch* the ball and lingers briefly after
+    they lose it, which keeps a shot or a pass captioned with whoever struck it.
+
+    Shared by both renderers so the fix cannot drift back out of one of them.
+    """
+
+    def __init__(self, linger: float = PLATE_LINGER, fade: float = PLATE_FADE) -> None:
+        self.linger = linger
+        self.fade = fade
+        self.player = None
+        self.since = 0
+
+    def reset(self) -> None:
+        self.player = None
+        self.since = 0
+
+    def update(self, match):
+        """Return (player_or_None, alpha) for the current tick."""
+        if match.owner is not None:
+            self.player = match.owner
+            self.since = match.tick
+            return match.owner, 1.0
+
+        toucher = match.last_touch
+        if toucher is not self.player:
+            self.player = toucher
+            self.since = match.tick
+        if self.player is None:
+            return None, 0.0
+
+        elapsed = (match.tick - self.since) * match.rules.dt
+        if elapsed >= self.linger:
+            return None, 0.0
+        return self.player, min(1.0, (self.linger - elapsed) / self.fade)
+
+
 def render_pitch_surface(rules, scale: float, pad_m: float = 0.0,
                          draw_goals: bool = True) -> pygame.Surface:
     """Draw the pitch and all its markings to a surface, `scale` px per metre.
@@ -175,8 +217,7 @@ class Viewer:
         self.font_mid = pygame.font.SysFont("helvetica,arial,sans-serif", 17, bold=True)
         self.font_name = pygame.font.SysFont("helvetica,arial,sans-serif", 14, bold=True)
         self._pitch_cache = None
-        self._plate_player = None
-        self._plate_since = 0
+        self._plate = NamePlateTracker()
         self._sprite_cache: dict = {}
         self._layout()
 
@@ -250,8 +291,7 @@ class Viewer:
                     self.debug = not self.debug
                 elif e.key == pygame.K_r:
                     self.match = self.match_factory()
-                    self._plate_player = None  # stale reference into the old match
-                    self._plate_since = 0
+                    self._plate.reset()  # drop the stale reference into the old match
                     self._layout()
                 elif e.key == pygame.K_s:
                     self.single_step = True
@@ -451,32 +491,7 @@ class Viewer:
         pygame.draw.circle(self.screen, (210, 210, 214), center, rad, 1)
 
     def _plate_target(self):
-        """Who the name plate should caption, and how opaque it should be.
-
-        Possession alone is far too fleeting to read: an outfielder holds the
-        ball for well under a second, while a keeper can sit on it for six. So
-        the plate follows the last player to *touch* the ball and lingers
-        briefly after they lose it, which keeps a shot or a pass captioned with
-        whoever struck it.
-        """
-        m = self.match
-        if m.owner is not None:
-            self._plate_player = m.owner
-            self._plate_since = m.tick
-            return m.owner, 1.0
-
-        toucher = m.last_touch
-        if toucher is not self._plate_player:
-            self._plate_player = toucher
-            self._plate_since = m.tick
-        if self._plate_player is None:
-            return None, 0.0
-
-        elapsed = (m.tick - self._plate_since) * m.rules.dt
-        if elapsed >= PLATE_LINGER:
-            return None, 0.0
-        fade = min(1.0, (PLATE_LINGER - elapsed) / PLATE_FADE)
-        return self._plate_player, fade
+        return self._plate.update(self.match)
 
     def _draw_owner_name(self) -> None:
         """Name plate above whoever is on the ball."""

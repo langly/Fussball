@@ -297,6 +297,22 @@ class Match:
         )
         if p.vel.length_sq() > 0.04:
             p.heading = p.vel.normalized()
+        else:
+            # Standing still: turn to watch the ball instead of keeping whatever
+            # direction we last ran in. Note this is stable for a player in
+            # possession -- the ball sits at pos + heading * dribble_offset, so
+            # it is already dead ahead and the heading does not drift.
+            to_ball = self.ball.pos - p.pos
+            if to_ball.length_sq() > 1e-6:
+                # Rotate by angle, not by lerping the vectors: when the ball is
+                # exactly behind you the difference vector is antiparallel, so a
+                # lerp only shrinks the heading and never turns it at all.
+                current = math.atan2(p.heading.y, p.heading.x)
+                target = math.atan2(to_ball.y, to_ball.x)
+                delta = (target - current + math.pi) % (2.0 * math.pi) - math.pi
+                step = min(abs(delta), r.idle_turn_rate * dt)
+                angle = current + math.copysign(step, delta)
+                p.heading = Vec2(math.cos(angle), math.sin(angle))
 
     def _separate_players(self) -> None:
         """Cheap pairwise push-apart so bodies do not overlap."""
