@@ -24,3 +24,7 @@ panda3d>=1.10,<2
 # Optional: lets animated GIFs play on the pitch-side hoardings (--ads).
 # Without it, GIFs simply show their first frame and stills work as normal.
 pillow>=10,<14
+
+# Development only: the test suite. Not needed to run a match.
+#   .venv/bin/pip install pytest && .venv/bin/python -m pytest
+pytest>=8,<10

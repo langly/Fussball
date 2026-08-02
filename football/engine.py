@@ -556,6 +556,12 @@ class Match:
             for p in self.players:
                 if not self._may_touch(p) or p.kick_cd > 0.0:
                     continue
+                if p.is_keeper and p.catch_cd > 0.0:
+                    # A keeper who has just been forced to release the ball must
+                    # actually give it up. Blocking only the *catch* let them
+                    # re-collect it with their feet, so the six-second rule
+                    # merely restarted its own timer instead of dispossessing.
+                    continue
                 if not self._can_reach(p):
                     continue  # sailing over their head
                 d = p.pos.dist(self.ball.pos)
