@@ -153,6 +153,36 @@ def _joint(parent: NodePath, radius: float, material: Material) -> NodePath:
     return ball
 
 
+def _make_shadow_disc(radius: float, segments: int = 28, alpha: float = 0.55) -> NodePath:
+    """A soft round shadow blob, as a vertex-coloured fan in the XY plane.
+
+    A CardMaker quad is exactly that -- a square -- so an untextured shadow
+    reads as a dark box on the grass. Fading the alpha out to zero at the rim
+    gives a circular blob with soft edges, and doing it in vertex colours
+    avoids a texture (and the ram-image plumbing that goes with one) entirely.
+    """
+    fmt = GeomVertexFormat.getV3c4()
+    vdata = GeomVertexData("shadow", fmt, Geom.UHStatic)
+    vertex = GeomVertexWriter(vdata, "vertex")
+    color = GeomVertexWriter(vdata, "color")
+
+    vertex.addData3(0.0, 0.0, 0.0)
+    color.addData4(0.0, 0.0, 0.0, alpha)
+    for i in range(segments + 1):
+        t = 2.0 * math.pi * i / segments
+        vertex.addData3(math.cos(t) * radius, math.sin(t) * radius, 0.0)
+        color.addData4(0.0, 0.0, 0.0, 0.0)
+
+    tris = GeomTriangles(Geom.UHStatic)
+    for i in range(segments):
+        tris.addVertices(0, i + 1, i + 2)
+    geom = Geom(vdata)
+    geom.addPrimitive(tris)
+    node = GeomNode("shadow")
+    node.addGeom(geom)
+    return NodePath(node)
+
+
 def _material(rgb, shininess: float = 18.0, ambient: float = 0.42) -> Material:
     m = Material()
     m.setDiffuse(Vec4(rgb[0], rgb[1], rgb[2], 1.0))
@@ -346,6 +376,14 @@ class Viewer3D:
         loadPrcFileData("", "window-title fussball -- 3D")
         loadPrcFileData("", "audio-library-name null")
         loadPrcFileData("", "sync-video #t")
+        # Ten rigs of a dozen joints each, all moving every frame, mint
+        # thousands of unique transforms per second. Panda caches composed
+        # transforms and render states, and here those tables grow faster than
+        # they are collected: the frame rate decays steadily during a match
+        # (measured 580 -> 101 fps over a few thousand frames). Turning the
+        # caches off costs a few percent up front and holds a flat ~570 fps.
+        loadPrcFileData("", "transform-cache false")
+        loadPrcFileData("", "state-cache false")
 
         from direct.showbase.ShowBase import ShowBase
 
@@ -359,6 +397,8 @@ class Viewer3D:
         self.orbit = [0.0, -22.0, 120.0]  # heading, pitch, distance
         self._accum = 0.0
         self._plate = NamePlateTracker()
+        self._plate_name = None
+        self._plate_alpha_step = -1
 
         self.base.setBackgroundColor(*SKY)
         self.base.disableMouse()
@@ -406,7 +446,7 @@ class Viewer3D:
 
         # A blob on the turf under the ball -- with real height in the sim,
         # this is what tells you how high a lofted ball actually is.
-        self.ball_shadow = self._make_shadow(0.5)
+        self.ball_shadow = self._make_shadow(0.42)
 
         sun = DirectionalLight("sun")
         sun.setColor(Vec4(1.05, 1.02, 0.95, 1))
@@ -443,13 +483,11 @@ class Viewer3D:
         return np_
 
     def _make_shadow(self, radius: float) -> NodePath:
-        cm = CardMaker("shadow")
-        cm.setFrame(-radius, radius, -radius, radius)
-        np_ = self.base.render.attachNewNode(cm.generate())
-        np_.setP(-90)
-        np_.setColor(0, 0, 0, 0.32)
+        np_ = _make_shadow_disc(radius)
+        np_.reparentTo(self.base.render)
         np_.setTransparency(TransparencyAttrib.MAlpha)
-        np_.setLightOff()
+        np_.setLightOff()  # keep the vertex alpha exactly as authored
+        np_.setDepthWrite(False)  # shadows should not occlude one another
         np_.setZ(0.015)
         return np_
 
@@ -691,10 +729,12 @@ class Viewer3D:
         self.ball.setPos(b.pos.x, b.pos.y, b.z + m.rules.ball_radius)
         self._spin_ball(b, m.rules)
         self.ball_shadow.setPos(b.pos.x, b.pos.y, 0.02)
-        # the shadow shrinks and fades as the ball climbs
+        # the shadow shrinks and fades as the ball climbs. setColorScale, not
+        # setColor -- the latter would replace the vertex alpha that gives the
+        # blob its soft edge, turning it back into a hard disc.
         k = max(0.35, 1.0 - b.z / 12.0)
         self.ball_shadow.setScale(k)
-        self.ball_shadow.setColor(0, 0, 0, 0.32 * k)
+        self.ball_shadow.setColorScale(1.0, 1.0, 1.0, k)
 
         # Follows the last toucher with a linger, not just the current owner:
         # keepers hold the ball for seconds and outfielders for a fraction of
@@ -703,10 +743,19 @@ class Viewer3D:
         if carrier is None:
             self.name_np.hide()
         else:
-            self.name_plate.setText(carrier.name)
+            # Only touch the TextNode when something actually changed. Each of
+            # setText/setTextColor/setCardColor forces the text geometry to be
+            # rebuilt, and doing that every frame degrades the frame rate
+            # steadily over a match (measured: 556 -> 221 fps).
+            step = round(alpha * 12)
+            if carrier.name != self._plate_name or step != self._plate_alpha_step:
+                self._plate_name = carrier.name
+                self._plate_alpha_step = step
+                a = step / 12.0
+                self.name_plate.setText(carrier.name)
+                self.name_plate.setTextColor(1, 1, 1, a)
+                self.name_plate.setCardColor(0, 0, 0, 0.55 * a)
             self.name_np.setPos(carrier.pos.x, carrier.pos.y, 2.15)
-            self.name_plate.setTextColor(1, 1, 1, alpha)
-            self.name_plate.setCardColor(0, 0, 0, 0.55 * alpha)
             self.name_np.show()
 
     def _spin_ball(self, b, rules) -> None:
