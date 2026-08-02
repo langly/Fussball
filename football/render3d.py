@@ -31,6 +31,7 @@ from panda3d.core import (
 )
 
 from .engine import AWAY, HOME, Match
+from .ads import load_ad_clips, placeholder_clips
 from .render import (
     GRASS_A, HAIR_TONES, SKIN_TONES, TEAM_COLORS, NamePlateTracker,
     render_pitch_surface,
@@ -371,7 +372,7 @@ class Viewer3D:
     """Drives a `Match` and draws it with Panda3D."""
 
     def __init__(self, match_factory, window=(1400, 900), speed: float = 1.0,
-                 camera: str = "broadcast") -> None:
+                 camera: str = "broadcast", ads_dir=None, centre_logo=None) -> None:
         loadPrcFileData("", f"win-size {window[0]} {window[1]}")
         loadPrcFileData("", "window-title fussball -- 3D")
         loadPrcFileData("", "audio-library-name null")
@@ -399,6 +400,9 @@ class Viewer3D:
         self._plate = NamePlateTracker()
         self._plate_name = None
         self._plate_alpha_step = -1
+        self._ad_clips = load_ad_clips(ads_dir) if ads_dir else []
+        self._centre_logo = centre_logo
+        self._elapsed = 0.0
 
         self.base.setBackgroundColor(*SKY)
         self.base.disableMouse()
@@ -414,7 +418,8 @@ class Viewer3D:
 
         # Ground: the 2D renderer already draws every marking, so borrow it as
         # a texture instead of rebuilding the line work as geometry.
-        surface = render_pitch_surface(r, PITCH_TEXTURE_PX_PER_M, pad_m=0.0, draw_goals=False)
+        surface = render_pitch_surface(r, PITCH_TEXTURE_PX_PER_M, pad_m=0.0, draw_goals=False,
+                                       centre_logo=self._centre_logo)
         self.pitch_np = self._textured_ground(surface, r)
 
         # A wider apron of plain grass so the pitch does not float in the void.
@@ -426,6 +431,7 @@ class Viewer3D:
         apron.setMaterial(_material([c * 0.72 / 255.0 for c in GRASS_A]), 1)
 
         self._build_stadium(r)
+        self._build_hoardings(r)
         self._build_goals(r)
         self._build_players(r)
 
@@ -545,6 +551,91 @@ class Viewer3D:
         # scene (measured: 42 fps before, ~10x that after).
         stadium.flattenStrong()
 
+    def _surface_to_texture(self, surface, name: str = "tex") -> Texture:
+        """Upload a pygame surface as a Panda texture, flipping for Panda's origin."""
+        import pygame
+
+        flipped = pygame.transform.flip(surface, False, True)
+        w, h = flipped.get_size()
+        tex = Texture(name)
+        tex.setup2dTexture(w, h, Texture.TUnsignedByte, Texture.FRgba)
+        tex.setRamImage(pygame.image.tostring(flipped, "RGBA"))
+        tex.setMagfilter(Texture.FTLinear)
+        tex.setMinfilter(Texture.FTLinear)
+        return tex
+
+    def _build_hoardings(self, r) -> None:
+        """LED advertising boards ringing the pitch.
+
+        The perimeter is split into four runs (two touchlines, two ends). Every
+        board in a run shows the same frame at the same moment, exactly as a
+        real stadium does -- which also means a run costs a single texture and
+        the boards batch into one draw call instead of dozens.
+        """
+        clips = self._ad_clips or placeholder_clips()
+        self._ad_runs = []
+
+        board_w, board_h = 6.0, 1.12
+        off = 4.2  # metres beyond the lines
+        lean = -9.0  # boards tip back slightly, as they do on a real pitch
+        x0, x1 = -off, r.length + off
+        y0, y1 = -off, r.width + off
+
+        # A CardMaker's front is its local -Y and its local +X runs along the
+        # board, and one heading fixes both. Every run must face the pitch, so
+        # the runs on the far side of each axis are laid out in reverse -- get
+        # this wrong and the advertising comes out mirrored.
+        runs = [
+            ("near", 180.0, (x1, y0), (-1.0, 0.0), x1 - x0),
+            ("far", 0.0, (x0, y1), (1.0, 0.0), x1 - x0),
+            ("west", 90.0, (x0, y0), (0.0, 1.0), y1 - y0),
+            ("east", 270.0, (x1, y1), (0.0, -1.0), y1 - y0),
+        ]
+
+        backs = self.base.render.attachNewNode("ad_backs")
+        for index, (name, heading, origin, step, span) in enumerate(runs):
+            group = self.base.render.attachNewNode(f"ads_{name}")
+            count = max(1, int(span / board_w))
+            width = span / count
+            for i in range(count):
+                pos = (origin[0] + step[0] * width * i,
+                       origin[1] + step[1] * width * i, 0.05)
+                cm = CardMaker(f"ad_{name}_{i}")
+                cm.setFrame(0, width, 0, board_h)
+                board = group.attachNewNode(cm.generate())
+                board.setPos(*pos)
+                board.setHpr(heading, lean, 0)
+                # A plain dark panel behind each board. Boards face the pitch,
+                # so from outside you would otherwise see either nothing (they
+                # are culled) or the advert mirrored (if made two-sided).
+                cm_back = CardMaker(f"adback_{name}_{i}")
+                cm_back.setFrame(0, width, 0, board_h)
+                back = backs.attachNewNode(cm_back.generate())
+                back.setPos(pos[0] + step[0] * width, pos[1] + step[1] * width, pos[2])
+                back.setHpr(heading + 180.0, -lean, 0)
+            group.setLightOff()  # LED panels emit, they are not lit
+            group.flattenStrong()
+            clip = clips[index % len(clips)]
+            self._ad_runs.append({
+                "node": group,
+                "clip": clip,
+                # stagger the runs so the ring is not one synchronised wall
+                "phase": index * 3.1,
+                "textures": [self._surface_to_texture(f, f"ad{index}") for f in clip.frames],
+                "shown": -1,
+            })
+
+        backs.setColor(0.16, 0.17, 0.20, 1)
+        backs.setLightOff()
+        backs.flattenStrong()
+
+    def _update_hoardings(self, elapsed: float) -> None:
+        for run in self._ad_runs:
+            frame = run["clip"].frame_index(elapsed + run["phase"])
+            if frame != run["shown"]:  # only touch state when the frame changes
+                run["shown"] = frame
+                run["node"].setTexture(run["textures"][frame], 1)
+
     def _build_goals(self, r) -> None:
         white = _material((0.95, 0.95, 0.96), 40.0)
         bar = r.crossbar_height
@@ -629,6 +720,7 @@ class Viewer3D:
             text="space pause | +/- speed | 1 2 3 camera | drag orbit | tab numbers | r restart | q quit",
             pos=(0, 0.06), scale=0.035, fg=(0.80, 0.84, 0.90, 1),
             shadow=(0, 0, 0, 0.7), parent=self.base.a2dBottomCenter)
+        self._build_crests()
         self.name_plate = TextNode("carrier")
         self.name_plate.setAlign(TextNode.ACenter)
         self.name_plate.setTextColor(1, 1, 1, 1)
@@ -646,6 +738,42 @@ class Viewer3D:
         self.name_np.setDepthWrite(False)
         self.name_np.setBin("fixed", 40)
         self.name_np.hide()
+
+    def _crest_texture(self, logo) -> Texture | None:
+        """Turn a validated (w, h, RGBA) crest into a crisp, unfiltered texture."""
+        if logo is None:
+            return None
+        width, height, pixels = logo
+        tex = Texture("crest")
+        tex.setup2dTexture(width, height, Texture.TUnsignedByte, Texture.FRgba)
+        # rows are bottom-up in a Panda ram image
+        data = bytearray()
+        for y in range(height - 1, -1, -1):
+            for x in range(width):
+                r, g, b, a = pixels[y * width + x]
+                data += bytes((r, g, b, a))
+        tex.setRamImage(bytes(data))
+        tex.setMagfilter(Texture.FTNearest)  # keep the pixel-art crisp
+        tex.setMinfilter(Texture.FTLinear)
+        return tex
+
+    def _build_crests(self) -> None:
+        """Club crests either side of the scoreline."""
+        from direct.gui.OnscreenImage import OnscreenImage
+
+        self.crests = []
+        for team, side in ((HOME, -1), (AWAY, 1)):
+            controller = self.match.controllers[team]
+            logo = controller.logo() if hasattr(controller, "logo") else None
+            tex = self._crest_texture(logo)
+            if tex is None:
+                self.crests.append(None)
+                continue
+            image = OnscreenImage(image=tex, scale=0.055,
+                                  pos=(side * 0.60, 0, -0.13),
+                                  parent=self.base.a2dTopCenter)
+            image.setTransparency(TransparencyAttrib.MAlpha)
+            self.crests.append(image)
 
     # -- input ---------------------------------------------------------
     def _bind_keys(self) -> None:
@@ -698,8 +826,10 @@ class Viewer3D:
         from direct.task import Task
 
         dt = ClockObject.getGlobalClock().getDt()
+        self._elapsed += dt
         self._step_sim(dt)
         self._sync_scene(dt)
+        self._update_hoardings(self._elapsed)
         self._move_camera(dt)
         self._update_hud()
         return Task.cont

@@ -8,6 +8,16 @@ from football.api import Action, Team, Vec2
 
 class Chaser(Team):
     name = "Chasers"
+    logo = (
+        "..RRRRR..",
+        ".RYYYYYR.",
+        "RYYRRRYYR",
+        "RYRYYYRYR",
+        "RYYRRRYYR",
+        ".RYYYYYR.",
+        "..RRRRR..",
+    )
+    logo_colors = {"R": "#c8321f", "Y": "#ffd447"}
 
     def act(self, state):
         actions = {}

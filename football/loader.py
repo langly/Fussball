@@ -10,7 +10,7 @@ import traceback
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from .api import Action, Team
+from .api import Action, Team, parse_logo
 
 
 class BotError(Exception):
@@ -113,6 +113,28 @@ class Controller:
         except Exception:
             self._report("player_names")
         return out
+
+    def logo(self):
+        """The team's crest as (width, height, RGBA pixels), or None."""
+        try:
+            rows = getattr(self.team, "logo", None)
+            if rows is None:
+                return None
+            return parse_logo(rows, getattr(self.team, "logo_colors", None))
+        except Exception:
+            self._report("logo")
+            return None
+
+    def logo_source(self):
+        """The raw crest as the bot declared it, for sending over the wire."""
+        try:
+            rows = getattr(self.team, "logo", None)
+            if not isinstance(rows, (list, tuple)):
+                return None, None
+            colours = getattr(self.team, "logo_colors", None)
+            return list(rows), dict(colours) if isinstance(colours, dict) else None
+        except Exception:
+            return None, None
 
     def stats(self) -> dict:
         avg = (self.think_seconds / self.calls * 1000.0) if self.calls else 0.0

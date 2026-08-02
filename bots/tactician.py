@@ -21,6 +21,20 @@ ZONES = {
 class Tactician(Team):
     name = "Tacticians"
     player_names = ("Vega", "Ferro", "Marek", "Oyelaran", "Bruhn")
+    # A crest is a character grid plus a palette, so the bot stays one file
+    # with no image assets beside it. '.' is transparent.
+    logo = (
+        "...HHHH...",
+        "..HWWWWH..",
+        ".HWWHHWWH.",
+        "HWWH..HWWH",
+        "HWH....HWH",
+        "HWWH..HWWH",
+        ".HWWHHWWH.",
+        "..HWWWWH..",
+        "...HHHH...",
+    )
+    logo_colors = {"H": "#1f4fa8", "W": "#eef3ff"}
 
     def on_match_start(self, info):
         self.pitch = info.pitch

@@ -175,6 +175,12 @@ def main(argv: list[str]) -> int:
             if kind == "names":
                 # asked before the match exists, so the host can label shirts
                 reply["names"] = team.squad_names(list(msg.get("fallback") or []))
+                # the crest travels as the bot declared it; the host re-parses
+                # and re-validates it rather than trusting anything sent here
+                rows, colours = team.logo_source()
+                if rows is not None:
+                    reply["logo"] = rows[:64]
+                    reply["logo_colors"] = colours
             elif kind == "start":
                 info, names_us, names_them = decode_setup(msg["d"])
                 pitch, limits = info.pitch, info.limits

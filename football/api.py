@@ -478,6 +478,66 @@ class Action:
         return self
 
 
+#: Bounds on a team crest. Deliberately small: a crest is decoration, and the
+#: host must never be handed anything it has to work hard to parse.
+LOGO_MAX_SIZE = 24
+
+
+def _logo_colour(value) -> tuple[int, int, int, int] | None:
+    """Accept '#rgb', '#rrggbb' or an (r, g, b[, a]) tuple. Reject anything else."""
+    if isinstance(value, str):
+        text = value.strip().lstrip("#")
+        if len(text) == 3:
+            text = "".join(c * 2 for c in text)
+        if len(text) != 6:
+            return None
+        try:
+            return (int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16), 255)
+        except ValueError:
+            return None
+    if isinstance(value, (list, tuple)) and 3 <= len(value) <= 4:
+        try:
+            parts = [max(0, min(255, int(v))) for v in value]
+        except (TypeError, ValueError):
+            return None
+        return (parts[0], parts[1], parts[2], parts[3] if len(parts) == 4 else 255)
+    return None
+
+
+def parse_logo(rows, colours) -> tuple[int, int, list[tuple[int, int, int, int]]] | None:
+    """Validate a team crest into (width, height, RGBA pixels), or None.
+
+    Crests are a grid of characters plus a palette rather than an image file,
+    for two reasons: a bot stays a single self-contained script with no assets
+    beside it, and the host never has to run an image decoder over bytes that
+    came from untrusted code.
+    """
+    if not isinstance(rows, (list, tuple)) or not rows:
+        return None
+    grid = [r for r in rows if isinstance(r, str)]
+    if len(grid) != len(rows) or len(grid) > LOGO_MAX_SIZE:
+        return None
+    width = max((len(r) for r in grid), default=0)
+    if width == 0 or width > LOGO_MAX_SIZE:
+        return None
+
+    palette: dict[str, tuple[int, int, int, int]] = {}
+    if isinstance(colours, dict):
+        for key, value in colours.items():
+            if not isinstance(key, str) or len(key) != 1:
+                continue
+            rgba = _logo_colour(value)
+            if rgba is not None:
+                palette[key] = rgba
+
+    pixels: list[tuple[int, int, int, int]] = []
+    for row in grid:
+        padded = row.ljust(width)
+        for ch in padded:
+            pixels.append((0, 0, 0, 0) if ch in " ." else palette.get(ch, (0, 0, 0, 0)))
+    return width, len(grid), pixels
+
+
 def _clamp01(v: float) -> float:
     try:
         f = float(v)
@@ -510,6 +570,17 @@ class Team:
 
     #: Shown on the scoreboard.
     name: str = "Unnamed"
+
+    #: Optional club crest, shown beside your name in the 3D view. A grid of
+    #: characters plus a palette -- '.' and ' ' are transparent -- so your bot
+    #: stays a single file with no image assets alongside it. Max 24x24.
+    #:
+    #:     logo = ("..HH..",
+    #:             ".HWWH.",
+    #:             "HW..WH")
+    #:     logo_colors = {"H": "#2d6cdf", "W": "#ffffff"}
+    logo: Sequence[str] | None = None
+    logo_colors: dict | None = None
 
     #: Optional shirt names for your five players, index 0 first (the keeper).
     #: Short names read best -- they are drawn above whoever has the ball.

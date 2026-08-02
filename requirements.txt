@@ -20,3 +20,7 @@ pygame-ce>=2.4,<3
 # The 3D view (--view 3d). The 2D view does not need it, and the 3D view still
 # needs pygame-ce, whose pitch drawing it reuses as a ground texture.
 panda3d>=1.10,<2
+
+# Optional: lets animated GIFs play on the pitch-side hoardings (--ads).
+# Without it, GIFs simply show their first frame and stills work as normal.
+pillow>=10,<14

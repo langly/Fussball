@@ -35,6 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="2d is the top-down debugging view (default); 3d uses Panda3D")
     p.add_argument("--camera", choices=("broadcast", "follow", "high"), default="broadcast",
                    help="starting camera for --view 3d")
+    p.add_argument("--ads", metavar="DIR", default=None,
+                   help="folder of images for the pitch-side hoardings; animated GIFs "
+                        "play if Pillow is installed. Built-in boards are used otherwise.")
+    p.add_argument("--centre-logo", metavar="FILE", default=None,
+                   help="image painted on the centre circle (both views)")
     p.add_argument(
         "--trusted", action="store_true",
         help="run bots in-process with no sandbox. Faster and easier to debug, "
@@ -138,15 +143,26 @@ def main(argv: list[str] | None = None) -> int:
         return factory(seed)
 
     # imported late so --headless needs neither a display nor these libraries
+    centre_logo = None
+    if args.centre_logo:
+        import pygame
+
+        pygame.init()
+        try:
+            centre_logo = pygame.image.load(args.centre_logo)
+        except Exception as exc:
+            print(f"warning: could not load centre logo: {exc}", file=sys.stderr)
+
     if args.view == "3d":
         from .render3d import Viewer3D
 
         viewer = Viewer3D(viewer_factory, window=(w, h), speed=args.speed,
-                          camera=args.camera)
+                          camera=args.camera, ads_dir=args.ads, centre_logo=centre_logo)
     else:
         from .render import Viewer
 
-        viewer = Viewer(viewer_factory, window=(w, h), speed=args.speed)
+        viewer = Viewer(viewer_factory, window=(w, h), speed=args.speed,
+                        centre_logo=centre_logo)
     match = viewer.run()
     print_result(match)
     return 0

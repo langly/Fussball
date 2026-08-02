@@ -69,6 +69,18 @@ HAIR_TONES = (
 SOCK_DARK = (28, 30, 36)
 
 
+def _with_alpha(surface: pygame.Surface) -> pygame.Surface:
+    """`convert_alpha` where possible, otherwise the surface untouched.
+
+    The 3D view has no pygame display -- Panda owns the window -- and
+    convert_alpha needs one. It is only an optimisation, so degrade quietly.
+    """
+    try:
+        return surface.convert_alpha()
+    except pygame.error:
+        return surface
+
+
 class NamePlateTracker:
     """Decides whose name to caption, and how opaque the plate should be.
 
@@ -112,7 +124,8 @@ class NamePlateTracker:
 
 
 def render_pitch_surface(rules, scale: float, pad_m: float = 0.0,
-                         draw_goals: bool = True) -> pygame.Surface:
+                         draw_goals: bool = True, centre_logo=None,
+                         logo_metres: float = 16.0, logo_alpha: int = 150) -> pygame.Surface:
     """Draw the pitch and all its markings to a surface, `scale` px per metre.
 
     Shared by both renderers: the 3D view uploads this as the ground texture
@@ -196,11 +209,27 @@ def render_pitch_surface(rules, scale: float, pad_m: float = 0.0,
         box = pygame.Rect(0, 0, rr * 2, rr * 2)
         box.center = local(Vec2(cx, cyy))
         pygame.draw.arc(surf, LINE, box, a0, a0 + math.pi / 2, lw)
+
+    if centre_logo is not None:
+        # Blended into the turf rather than laid on top as geometry, so it
+        # reads as painted on the grass and costs nothing to draw.
+        lw_px, lh_px = centre_logo.get_size()
+        if lw_px > 0 and lh_px > 0:
+            fit = min(metres(logo_metres) / lw_px, metres(logo_metres) / lh_px)
+            scaled = pygame.transform.smoothscale(
+                _with_alpha(centre_logo),
+                (max(1, int(lw_px * fit)), max(1, int(lh_px * fit))),
+            )
+            scaled.set_alpha(logo_alpha)
+            rect = scaled.get_rect(center=local(Vec2(r.length / 2, r.width / 2)))
+            surf.blit(scaled, rect)
     return surf
 
 
 class Viewer:
-    def __init__(self, match_factory, window=(1400, 900), speed: float = 1.0) -> None:
+    def __init__(self, match_factory, window=(1400, 900), speed: float = 1.0,
+                 centre_logo=None) -> None:
+        self._centre_logo = centre_logo
         pygame.init()
         pygame.display.set_caption("fussball — 5-a-side bot league")
         self.screen = pygame.display.set_mode(window, pygame.RESIZABLE)
@@ -331,7 +360,8 @@ class Viewer:
         self.screen.blit(self._pitch_cache, (int(self.ox) - pad, int(self.oy) - pad))
 
     def _render_pitch(self) -> pygame.Surface:
-        return render_pitch_surface(self.match.rules, self.scale, PITCH_PAD)
+        return render_pitch_surface(self.match.rules, self.scale, PITCH_PAD,
+                                    centre_logo=self._centre_logo)
 
     def _appearance(self, p):
         """Stable per-player skin and hair, so nobody changes mid-match."""

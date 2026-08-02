@@ -22,7 +22,7 @@ import sys
 import time
 from pathlib import Path
 
-from .api import Action
+from .api import Action, parse_logo
 from .protocol import MAX_LINE_BYTES, decode_actions, encode_setup, encode_state
 
 #: Wall-clock a bot gets per tick before it is killed. Generous next to the
@@ -108,6 +108,7 @@ class SandboxedController:
         self.calls = 0
         self.killed_reason: str | None = None
         self.closed = False
+        self._logo = None
         self._buf = b""
         self._idle = {i: Action.idle() for i in range(squad_size)}
 
@@ -263,11 +264,18 @@ class SandboxedController:
                 print(f"[{self.name}] further errors will be silenced.", file=sys.stderr)
 
     # -- controller interface -----------------------------------------
+    def logo(self):
+        """The crest the bot declared, re-validated here rather than trusted."""
+        return self._logo
+
     def squad_names(self, fallback) -> list[str]:
         reply = self._exchange({"t": "names", "fallback": list(fallback)}, STARTUP_TIMEOUT)
         out = list(fallback)
         if reply is None:
             return out
+        # Parsed with the same validator the trusted path uses, so a hostile
+        # bot cannot smuggle anything through the crest.
+        self._logo = parse_logo(reply.get("logo"), reply.get("logo_colors"))
         raw = reply.get("names")
         if not isinstance(raw, list):
             return out
