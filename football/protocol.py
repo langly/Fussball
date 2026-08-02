@@ -24,6 +24,8 @@ _LIMIT_FIELDS = (
     "keeper_trap_speed", "tackle_radius", "run_speed", "sprint_speed",
     "min_kick_speed", "max_kick_speed", "keeper_catch_radius",
     "keeper_catch_max_speed", "ball_friction",
+    "gravity", "ball_restitution", "air_drag", "max_launch_angle",
+    "crossbar_height", "reach_foot", "reach_head", "reach_keeper",
 )
 _PITCH_FIELDS = (
     "length", "width", "goal_width", "penalty_depth", "penalty_width",
@@ -89,7 +91,8 @@ def encode_state(s: GameState) -> dict:
         "b": [b.pos.x, b.pos.y, b.vel.x, b.vel.y,
               -1 if b.owner_index is None else b.owner_index,
               1 if b.owned_by_us else 0, 1 if b.owned_by_them else 0,
-              1 if b.held_by_keeper else 0],
+              1 if b.held_by_keeper else 0,
+              b.height, b.vertical_speed],
         "u": [_encode_player(p) for p in s.us],
         "h": [_encode_player(p) for p in s.them],
     }
@@ -118,6 +121,7 @@ def decode_state(d: dict, pitch: PitchInfo, limits: Limits,
         phase=d["ph"], setpiece=d["sp"], setpiece_is_ours=d["spo"],
         ball=BallView(
             pos=Vec2(b[0], b[1]), vel=Vec2(b[2], b[3]),
+            height=b[8], vertical_speed=b[9],
             owner_index=None if b[4] < 0 else int(b[4]),
             owned_by_us=bool(b[5]), owned_by_them=bool(b[6]),
             held_by_keeper=bool(b[7]),
@@ -146,6 +150,7 @@ def encode_actions(actions, squad_size: int) -> dict:
             None if a.kick is None else [a.kick.x, a.kick.y],
             a.kick_power,
             1 if a.catch else 0,
+            a.lift,
         ]
     return out
 
@@ -172,7 +177,9 @@ def decode_actions(raw, squad_size: int) -> dict[int, Action]:
             continue
         if not 0 <= idx < squad_size:
             continue
-        if not isinstance(value, (list, tuple)) or len(value) != 6:
+        # accept 6 (pre-aerial) or 7 fields, so an older reply is not silently
+        # discarded -- it simply means no lift
+        if not isinstance(value, (list, tuple)) or len(value) not in (6, 7):
             continue
         kick = None
         if isinstance(value[3], (list, tuple)) and len(value[3]) == 2:
@@ -183,5 +190,6 @@ def decode_actions(raw, squad_size: int) -> dict[int, Action]:
             kick=kick,
             kick_power=_num(value[4], 0.0, 1.0),
             catch=bool(value[5]),
+            lift=_num(value[6], 0.0, 1.0) if len(value) > 6 else 0.0,
         ).sanitized()
     return out

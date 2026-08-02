@@ -31,6 +31,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=1, help="RNG seed; the same seed replays identically")
     p.add_argument("--speed", type=float, default=1.0, help="initial playback speed multiplier")
     p.add_argument("--window", default="1400x900", help="window size, e.g. 1920x1080")
+    p.add_argument("--view", choices=("2d", "3d"), default="2d",
+                   help="2d is the top-down debugging view (default); 3d uses Panda3D")
+    p.add_argument("--camera", choices=("broadcast", "follow", "high"), default="broadcast",
+                   help="starting camera for --view 3d")
     p.add_argument(
         "--trusted", action="store_true",
         help="run bots in-process with no sandbox. Faster and easier to debug, "
@@ -121,12 +125,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  goals {goals[HOME]} – {goals[AWAY]}")
         return 0
 
-    from .render import Viewer  # imported late so --headless needs no display
-
     try:
         w, h = (int(v) for v in args.window.lower().split("x"))
     except ValueError:
-        w, h = 1180, 800
+        w, h = 1400, 900
 
     counter = {"n": 0}
 
@@ -135,7 +137,16 @@ def main(argv: list[str] | None = None) -> int:
         counter["n"] += 1
         return factory(seed)
 
-    viewer = Viewer(viewer_factory, window=(w, h), speed=args.speed)
+    # imported late so --headless needs neither a display nor these libraries
+    if args.view == "3d":
+        from .render3d import Viewer3D
+
+        viewer = Viewer3D(viewer_factory, window=(w, h), speed=args.speed,
+                          camera=args.camera)
+    else:
+        from .render import Viewer
+
+        viewer = Viewer(viewer_factory, window=(w, h), speed=args.speed)
     match = viewer.run()
     print_result(match)
     return 0

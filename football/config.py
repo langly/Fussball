@@ -72,6 +72,28 @@ class Rules:
     deflection_restitution: float = 0.45
     deflection_spread: float = 0.18  # radians of noise on a rebound
 
+    # --- aerial -------------------------------------------------------
+    # Only the ball leaves the ground. Players stay two-dimensional and are
+    # given a vertical *reach* instead, which keeps Vec2 correct everywhere
+    # for positions and avoids a full 3D rewrite for no gameplay gain.
+    gravity: float = 9.81
+    # Bounces are damped hard on purpose: an airborne ball cannot be trapped,
+    # so a lively ball that bounces five times keeps it out of play far longer
+    # than real turf would and turns matches into pinball.
+    ball_restitution: float = 0.42  # energy kept when it bounces off the turf
+    air_drag: float = 0.06  # airborne balls are not slowed by turf friction
+    settle_speed: float = 1.4  # below this a bounce stops bouncing
+    max_launch_angle: float = 0.95  # radians at lift = 1.0 (~54 degrees)
+    crossbar_height: float = 2.44
+    post_radius: float = 0.06
+    reach_foot: float = 0.55  # trap or dribble only below this
+    # There is no jumping in the model, so reach is a hard ceiling. Set it at
+    # heading height rather than standing height: too low and a lofted ball
+    # simply sails over everyone untouched, which makes hoofing it downfield
+    # a free way to bypass the whole pitch.
+    reach_head: float = 2.60  # can still head or volley the ball below this
+    reach_keeper: float = 2.95  # a keeper reaches higher again
+
     # --- duels --------------------------------------------------------
     tackle_radius: float = 1.35
     tackle_rate: float = 1.9  # base steal attempts per second

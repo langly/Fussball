@@ -16,3 +16,7 @@
 # module. Do not install both into one environment -- they will clash.
 
 pygame-ce>=2.4,<3
+
+# The 3D view (--view 3d). The 2D view does not need it, and the 3D view still
+# needs pygame-ce, whose pitch drawing it reuses as a ground texture.
+panda3d>=1.10,<2

@@ -69,6 +69,94 @@ HAIR_TONES = (
 SOCK_DARK = (28, 30, 36)
 
 
+def render_pitch_surface(rules, scale: float, pad_m: float = 0.0,
+                         draw_goals: bool = True) -> pygame.Surface:
+    """Draw the pitch and all its markings to a surface, `scale` px per metre.
+
+    Shared by both renderers: the 3D view uploads this as the ground texture
+    rather than re-implementing the line work in geometry. It takes `rules`
+    instead of a Viewer so it can be called without a window, and skips the
+    flat goal boxes when the caller draws real 3D frames instead.
+    """
+    r = rules
+    pad = int(pad_m * scale)
+    w, h = int(r.length * scale), int(r.width * scale)
+    # padded so the goals, which sit behind the goal lines, are not clipped
+    surf = pygame.Surface((w + pad * 2, h + pad * 2), pygame.SRCALPHA)
+
+    def local(v: Vec2) -> tuple[int, int]:
+        return (int((v.x + pad_m) * scale), int((v.y + pad_m) * scale))
+
+    def metres(x: float) -> int:
+        return max(1, int(x * scale))
+
+    stripes = 12
+    for i in range(stripes):
+        x0 = pad + int(i * w / stripes)
+        x1 = pad + int((i + 1) * w / stripes)
+        surf.fill(GRASS_A if i % 2 == 0 else GRASS_B, pygame.Rect(x0, pad, x1 - x0, h))
+
+    lw = max(1, int(0.12 * scale))
+
+    def line(a: Vec2, b: Vec2) -> None:
+        pygame.draw.line(surf, LINE, local(a), local(b), lw)
+
+    def rect(x0: float, y0: float, x1: float, y1: float) -> None:
+        pygame.draw.rect(
+            surf, LINE,
+            pygame.Rect(local(Vec2(x0, y0)),
+                        (int((x1 - x0) * scale), int((y1 - y0) * scale))),
+            lw,
+        )
+
+    rect(0, 0, r.length, r.width)
+    line(Vec2(r.length / 2, 0), Vec2(r.length / 2, r.width))
+    centre = local(Vec2(r.length / 2, r.width / 2))
+    pygame.draw.circle(surf, LINE, centre, metres(r.center_circle_r), lw)
+    pygame.draw.circle(surf, LINE, centre, max(2, lw + 1))
+
+    cy = r.width / 2
+    for side in (0, 1):
+        sign = 1 if side == 0 else -1
+        base = 0.0 if side == 0 else r.length
+        rect(min(base, base + sign * r.penalty_depth), cy - r.penalty_width / 2,
+             max(base, base + sign * r.penalty_depth), cy + r.penalty_width / 2)
+        rect(min(base, base + sign * r.goal_area_depth), cy - r.goal_area_width / 2,
+             max(base, base + sign * r.goal_area_depth), cy + r.goal_area_width / 2)
+        spot = Vec2(base + sign * 11.0, cy)
+        pygame.draw.circle(surf, LINE, local(spot), max(2, lw))
+        arc_r = metres(9.15)
+        box = pygame.Rect(0, 0, arc_r * 2, arc_r * 2)
+        box.center = local(spot)
+        a0 = -math.pi / 3 if side == 0 else math.pi * 2 / 3
+        pygame.draw.arc(surf, LINE, box, a0, a0 + math.pi * 2 / 3, lw)
+
+        if draw_goals:
+            goal_depth = 2.2
+            gx0 = -goal_depth if side == 0 else r.length
+            goal_rect = pygame.Rect(local(Vec2(gx0, r.goal_y0)),
+                                    (metres(goal_depth), metres(r.goal_width)))
+            pygame.draw.rect(surf, (228, 232, 238, 70), goal_rect)  # netting
+            step = max(3, metres(0.6))
+            for gx in range(goal_rect.left, goal_rect.right, step):
+                pygame.draw.line(surf, (250, 250, 252, 130), (gx, goal_rect.top), (gx, goal_rect.bottom))
+            for gy in range(goal_rect.top, goal_rect.bottom, step):
+                pygame.draw.line(surf, (250, 250, 252, 130), (goal_rect.left, gy), (goal_rect.right, gy))
+            pygame.draw.rect(surf, (252, 252, 254), goal_rect, max(2, lw))
+            post = max(2, int(lw * 1.6))
+            for py in (r.goal_y0, r.goal_y1):
+                pygame.draw.circle(surf, (252, 252, 254),
+                                   local(Vec2(0.0 if side == 0 else r.length, py)), post)
+
+    for cx, cyy, a0 in ((0, 0, 0.0), (r.length, 0, math.pi / 2),
+                        (0, r.width, -math.pi / 2), (r.length, r.width, math.pi)):
+        rr = metres(1.0)
+        box = pygame.Rect(0, 0, rr * 2, rr * 2)
+        box.center = local(Vec2(cx, cyy))
+        pygame.draw.arc(surf, LINE, box, a0, a0 + math.pi / 2, lw)
+    return surf
+
+
 class Viewer:
     def __init__(self, match_factory, window=(1400, 900), speed: float = 1.0) -> None:
         pygame.init()
@@ -203,92 +291,7 @@ class Viewer:
         self.screen.blit(self._pitch_cache, (int(self.ox) - pad, int(self.oy) - pad))
 
     def _render_pitch(self) -> pygame.Surface:
-        r = self.match.rules
-        pad = int(PITCH_PAD * self.scale)
-        w, h = int(r.length * self.scale), int(r.width * self.scale)
-        # The surface is padded so the goals, which sit behind the goal lines,
-        # are not clipped away.
-        surf = pygame.Surface((w + pad * 2, h + pad * 2), pygame.SRCALPHA)
-        # mown stripes, inside the playing area only
-        stripes = 12
-        for i in range(stripes):
-            x0 = pad + int(i * w / stripes)
-            x1 = pad + int((i + 1) * w / stripes)
-            surf.fill(GRASS_A if i % 2 == 0 else GRASS_B, pygame.Rect(x0, pad, x1 - x0, h))
-
-        lw = max(1, int(0.12 * self.scale))
-
-        def line(a: Vec2, b: Vec2) -> None:
-            pygame.draw.line(surf, LINE, self._local(a), self._local(b), lw)
-
-        def rect(x0: float, y0: float, x1: float, y1: float) -> None:
-            pygame.draw.rect(
-                surf,
-                LINE,
-                pygame.Rect(
-                    self._local(Vec2(x0, y0)),
-                    (int((x1 - x0) * self.scale), int((y1 - y0) * self.scale)),
-                ),
-                lw,
-            )
-
-        rect(0, 0, r.length, r.width)
-        line(Vec2(r.length / 2, 0), Vec2(r.length / 2, r.width))
-        pygame.draw.circle(
-            surf, LINE, self._local(Vec2(r.length / 2, r.width / 2)), self.m(r.center_circle_r), lw
-        )
-        pygame.draw.circle(surf, LINE, self._local(Vec2(r.length / 2, r.width / 2)), max(2, lw + 1))
-
-        cy = r.width / 2
-        for side in (0, 1):
-            sign = 1 if side == 0 else -1
-            base = 0.0 if side == 0 else r.length
-            rect(
-                min(base, base + sign * r.penalty_depth),
-                cy - r.penalty_width / 2,
-                max(base, base + sign * r.penalty_depth),
-                cy + r.penalty_width / 2,
-            )
-            rect(
-                min(base, base + sign * r.goal_area_depth),
-                cy - r.goal_area_width / 2,
-                max(base, base + sign * r.goal_area_depth),
-                cy + r.goal_area_width / 2,
-            )
-            # penalty spot + arc
-            spot = Vec2(base + sign * 11.0, cy)
-            pygame.draw.circle(surf, LINE, self._local(spot), max(2, lw))
-            arc_r = self.m(9.15)
-            box = pygame.Rect(0, 0, arc_r * 2, arc_r * 2)
-            box.center = self._local(spot)
-            a0 = -math.pi / 3 if side == 0 else math.pi * 2 / 3
-            pygame.draw.arc(surf, LINE, box, a0, a0 + math.pi * 2 / 3, lw)
-            # The goal sits *behind* the line: x in [-depth, 0] on the left and
-            # [length, length+depth] on the right.
-            goal_depth = 2.2
-            gx0 = -goal_depth if side == 0 else r.length
-            goal_rect = pygame.Rect(
-                self._local(Vec2(gx0, r.goal_y0)),
-                (self.m(goal_depth), self.m(r.goal_width)),
-            )
-            pygame.draw.rect(surf, (228, 232, 238, 70), goal_rect)  # netting
-            step = max(3, self.m(0.6))
-            for gx in range(goal_rect.left, goal_rect.right, step):
-                pygame.draw.line(surf, (250, 250, 252, 130), (gx, goal_rect.top), (gx, goal_rect.bottom))
-            for gy in range(goal_rect.top, goal_rect.bottom, step):
-                pygame.draw.line(surf, (250, 250, 252, 130), (goal_rect.left, gy), (goal_rect.right, gy))
-            pygame.draw.rect(surf, (252, 252, 254), goal_rect, max(2, lw))
-            # posts
-            post = max(2, int(lw * 1.6))
-            for py in (r.goal_y0, r.goal_y1):
-                pygame.draw.circle(surf, (252, 252, 254), self._local(Vec2(0.0 if side == 0 else r.length, py)), post)
-        # corner arcs
-        for cx, cyy, a0 in ((0, 0, 0.0), (r.length, 0, math.pi / 2), (0, r.width, -math.pi / 2), (r.length, r.width, math.pi)):
-            rr = self.m(1.0)
-            box = pygame.Rect(0, 0, rr * 2, rr * 2)
-            box.center = self._local(Vec2(cx, cyy))
-            pygame.draw.arc(surf, LINE, box, a0, a0 + math.pi / 2, lw)
-        return surf
+        return render_pitch_surface(self.match.rules, self.scale, PITCH_PAD)
 
     def _appearance(self, p):
         """Stable per-player skin and hair, so nobody changes mid-match."""
@@ -411,7 +414,11 @@ class Viewer:
 
     def _draw_ball(self) -> None:
         b = self.match.ball
-        center = self.to_px(b.pos)
+        ground = self.to_px(b.pos)
+        # Lift the ball up the screen by its height and leave the shadow on the
+        # turf, so the top-down view still reads aerial play.
+        lift = int(b.z * self.scale * 0.8)
+        center = (ground[0], ground[1] - lift)
         rad = max(5, self.m(0.52))  # exaggerated: a true-scale ball is ~2 px
 
         # a struck ball smears along its direction of travel
@@ -422,11 +429,15 @@ class Viewer:
             pygame.draw.line(trail, (255, 255, 255, 70), self.to_px(back), center, max(2, rad))
             self.screen.blit(trail, (0, 0))
 
+        shrink = max(0.45, 1.0 - b.z / 14.0)
         shadow = pygame.Surface((rad * 4, rad * 4), pygame.SRCALPHA)
         pygame.draw.ellipse(
-            shadow, (0, 0, 0, 90), pygame.Rect(rad * 0.9, rad * 1.5, rad * 2.2, rad * 1.4)
+            shadow, (0, 0, 0, int(90 * shrink)),
+            pygame.Rect(rad * 0.9, rad * 1.5, rad * 2.2 * shrink, rad * 1.4 * shrink),
         )
-        self.screen.blit(shadow, (center[0] - rad * 2 + 1, center[1] - rad * 2 + 1))
+        self.screen.blit(shadow, (ground[0] - rad * 2 + 1, ground[1] - rad * 2 + 1))
+        if lift > 2:  # a line to the ground makes the height unambiguous
+            pygame.draw.line(self.screen, (255, 255, 255, 70), ground, center, 1)
 
         pygame.draw.circle(self.screen, BALL_C, center, rad)
         # classic panels, and a highlight so it reads as a sphere

@@ -41,8 +41,14 @@ class Player:
 
 @dataclass
 class Ball:
-    pos: Vec2
-    vel: Vec2 = field(default_factory=Vec2)
+    pos: Vec2  # position on the ground plane
+    vel: Vec2  # horizontal velocity
+    z: float = 0.0  # height of the ball's centre above the turf
+    vz: float = 0.0  # vertical velocity, positive is up
+
+    @property
+    def airborne(self) -> bool:
+        return self.z > 0.0
 
 
 @dataclass
@@ -79,7 +85,7 @@ class Match:
             for t in (HOME, AWAY)
             for i in range(self.squad_size)
         ]
-        self.ball = Ball(pos=Vec2(r.length / 2, r.width / 2))
+        self.ball = Ball(pos=Vec2(r.length / 2, r.width / 2), vel=Vec2())
 
         self.score = [0, 0]
         self.tick = 0
@@ -147,6 +153,14 @@ class Match:
             keeper_catch_radius=r.keeper_catch_radius,
             keeper_catch_max_speed=r.keeper_catch_max_speed,
             ball_friction=r.ball_friction,
+            gravity=r.gravity,
+            ball_restitution=r.ball_restitution,
+            air_drag=r.air_drag,
+            max_launch_angle=r.max_launch_angle,
+            crossbar_height=r.crossbar_height,
+            reach_foot=r.reach_foot,
+            reach_head=r.reach_head,
+            reach_keeper=r.reach_keeper,
         )
 
     def _pitch_info(self) -> PitchInfo:
@@ -177,8 +191,7 @@ class Match:
         offset = -1.2 if taking == HOME else 1.2
         striker.pos = Vec2(r.length / 2 + offset, r.width / 2)
 
-        self.ball.pos = Vec2(r.length / 2, r.width / 2)
-        self.ball.vel = Vec2()
+        self._place_ball(Vec2(r.length / 2, r.width / 2))
         self.owner = None
         self.last_touch = None
         self.loose_timer = 0.0
@@ -189,9 +202,15 @@ class Match:
         self.setpiece_team = taking
         self.setpiece_clock = 0.0
 
-    def _award_setpiece(self, kind: str, team: int, spot: Vec2) -> None:
+    def _place_ball(self, spot: Vec2) -> None:
+        """Put a dead ball on the turf, motionless."""
         self.ball.pos = spot
         self.ball.vel = Vec2()
+        self.ball.z = 0.0
+        self.ball.vz = 0.0
+
+    def _award_setpiece(self, kind: str, team: int, spot: Vec2) -> None:
+        self._place_ball(spot)
         self.owner = None
         self.last_touch = None
         self.loose_timer = 0.0
@@ -313,6 +332,17 @@ class Match:
         r = self.rules
         return r.control_radius + (r.keeper_control_bonus if p.is_keeper else 0.0)
 
+    def _reach(self, p: Player) -> float:
+        """How high this player can play the ball at all."""
+        return self.rules.reach_keeper if p.is_keeper else self.rules.reach_head
+
+    def _can_reach(self, p: Player) -> bool:
+        return self.ball.z <= self._reach(p)
+
+    def _can_trap(self, p: Player) -> bool:
+        """Bringing a ball under control needs it near the ground."""
+        return self.ball.z <= self.rules.reach_foot
+
     def _update_ball(self, actions, dt: float) -> None:
         r = self.rules
         if self.loose_timer > 0.0:
@@ -333,18 +363,47 @@ class Match:
             x = raw.x if in_mouth else min(max(raw.x, 0.0), r.length)
             self.ball.pos = Vec2(x, min(max(raw.y, 0.0), r.width))
             self.ball.vel = self.owner.vel
+            self.ball.z = 0.0  # a ball at your feet is on the ground
+            self.ball.vz = 0.0
             self.possession_ticks[self.owner.team] += 1
-        elif self.phase in FROZEN_PHASES or (self.phase == "setpiece" and self.ball.vel.length_sq() < 1e-6):
+        elif self.phase in FROZEN_PHASES or (
+            self.phase == "setpiece" and self.ball.vel.length_sq() < 1e-6 and not self.ball.airborne
+        ):
             self.ball.vel = Vec2()
         else:
-            decay = math.exp(-r.ball_friction * dt)
-            self.ball.vel = self.ball.vel * decay
-            if self.ball.vel.length() < r.ball_stop_speed:
-                self.ball.vel = Vec2()
-            self.ball.pos = self.ball.pos + self.ball.vel * dt
+            self._integrate_ball(dt)
 
         if self.phase == "setpiece":
             self._enforce_clearance(dt)
+
+    def _integrate_ball(self, dt: float) -> None:
+        """Move a free ball, through the air or along the ground."""
+        r = self.rules
+        b = self.ball
+
+        if b.airborne or b.vz > 0.0:
+            # In flight the turf cannot slow it -- only light air resistance.
+            drag = math.exp(-r.air_drag * dt)
+            b.vel = b.vel * drag
+            b.vz = (b.vz - r.gravity * dt) * drag
+        else:
+            decay = math.exp(-r.ball_friction * dt)
+            b.vel = b.vel * decay
+            if b.vel.length() < r.ball_stop_speed:
+                b.vel = Vec2()
+
+        b.pos = b.pos + b.vel * dt
+        b.z += b.vz * dt
+        self._hit_woodwork()
+
+        if b.z <= 0.0:
+            b.z = 0.0
+            if b.vz < 0.0:
+                bounce = -b.vz * r.ball_restitution
+                # a bounce that low is the ball settling, not bouncing
+                b.vz = bounce if bounce > r.settle_speed else 0.0
+                # scrub a little pace off on contact with the turf
+                b.vel = b.vel * (1.0 - 0.12 * r.ball_restitution)
 
     def _resolve_keeper(self, actions, dt: float) -> None:
         """Catching, holding and the six-second rule."""
@@ -368,7 +427,7 @@ class Match:
                 # six seconds are up: the ball is released in front of the keeper
                 gk = self.owner
                 forward = Vec2(1.0, 0.0) if gk.team == HOME else Vec2(-1.0, 0.0)
-                self.ball.pos = gk.pos + forward * (r.dribble_offset + 0.6)
+                self._place_ball(gk.pos + forward * (r.dribble_offset + 0.6))
                 self.ball.vel = forward * 2.0
                 self.owner = None
                 self.loose_timer = r.loose_after_kick
@@ -387,6 +446,8 @@ class Match:
                 continue
             if p.pos.dist(self.ball.pos) > r.keeper_catch_radius:
                 continue
+            if self.ball.z > r.reach_keeper:
+                continue  # over the keeper, not a save
             if not self._in_own_penalty_area(p, pitch):
                 continue
             incoming = (self.ball.vel - p.vel).length()
@@ -422,6 +483,8 @@ class Match:
                 continue
             if p.kick_cd > 0.0 or not self._may_touch(p):
                 continue
+            if not self._can_reach(p):
+                continue  # cannot strike what you cannot reach
             d = p.pos.dist(self.ball.pos)
             reach = self._control_radius(p) if self.owner is p else r.kick_reach
             if self.owner is not None and self.owner is not p:
@@ -444,8 +507,14 @@ class Match:
         spread = r.kick_spread * power * (1.0 + p.vel.length() / r.sprint_speed)
         direction = direction.rotated(self.rng.gauss(0.0, spread))
 
-        self.ball.vel = direction * speed + p.vel * r.kick_momentum
+        # `lift` tilts the strike upward: the same power sends the ball a
+        # shorter horizontal distance but over anyone in the way.
+        angle = max(0.0, min(1.0, action.lift)) * r.max_launch_angle
+        self.ball.vel = direction * (speed * math.cos(angle)) + p.vel * r.kick_momentum
+        self.ball.vz = speed * math.sin(angle)
         self.ball.pos = p.pos + direction * (self._control_radius(p) * 0.6)
+        if self.ball.vz <= 0.0:
+            self.ball.z = 0.0
         self.owner = None
         self.keeper_hold = 0.0
         self.loose_timer = r.loose_after_kick
@@ -471,10 +540,16 @@ class Match:
             for p in self.players:
                 if not self._may_touch(p) or p.kick_cd > 0.0:
                     continue
+                if not self._can_reach(p):
+                    continue  # sailing over their head
                 d = p.pos.dist(self.ball.pos)
                 if d <= self._control_radius(p) and d < best:
                     best, claimant = d, p
             if claimant is None:
+                return
+            if not self._can_trap(claimant):
+                # in reach but too high to control: it comes off them instead
+                self._deflect(claimant, r.deflection_restitution)
                 return
             # A ball travelling fast relative to the player cannot be trapped;
             # it rebounds off them. This is what keeps shots and clearances
@@ -523,6 +598,40 @@ class Match:
             self.last_touch = challenger
             challenger.kick_cd = 0.10
 
+    def _hit_woodwork(self) -> None:
+        """Bounce the ball off a post or the crossbar.
+
+        Only meaningful now that the ball has height: before, the frame could
+        be ignored because everything ran along the ground.
+        """
+        r = self.rules
+        b = self.ball
+        hit = r.post_radius + r.ball_radius
+        if b.z > r.crossbar_height + hit:
+            return
+        for goal_x in (0.0, r.length):
+            if abs(b.pos.x - goal_x) > hit:
+                continue
+            # crossbar: spans the mouth at bar height
+            if abs(b.z - r.crossbar_height) <= hit and r.goal_y0 <= b.pos.y <= r.goal_y1:
+                b.vz = -abs(b.vz) * r.ball_restitution
+                b.z = r.crossbar_height - hit
+                b.vel = b.vel * r.ball_restitution
+                self.events.append(Event(self.tick, self.clock, "woodwork", None, "crossbar"))
+                return
+            # posts: vertical, one at each edge of the mouth
+            for post_y in (r.goal_y0, r.goal_y1):
+                delta = Vec2(b.pos.x - goal_x, b.pos.y - post_y)
+                if delta.length() > hit or b.z > r.crossbar_height:
+                    continue
+                normal = delta.normalized()
+                if normal.length_sq() < 1e-9:
+                    normal = Vec2(1.0 if goal_x == 0.0 else -1.0, 0.0)
+                b.vel = (b.vel - normal * (2.0 * b.vel.dot(normal))) * r.ball_restitution
+                b.pos = Vec2(goal_x, post_y) + normal * (hit + 0.01)
+                self.events.append(Event(self.tick, self.clock, "woodwork", None, "post"))
+                return
+
     def _deflect(self, p: Player, restitution: float) -> None:
         """Bounce the ball off a player who could not bring it under control."""
         r = self.rules
@@ -534,6 +643,10 @@ class Match:
             rel = rel - normal * (2.0 * rel.dot(normal))
         rel = rel.rotated(self.rng.gauss(0.0, r.deflection_spread))
         self.ball.vel = rel * restitution + p.vel
+        # a ball blocked off a body pops up rather than staying pinned flat
+        self.ball.vz = abs(self.ball.vz) * restitution * 0.5 + (
+            1.5 if self.ball.z > r.reach_foot else 0.0
+        )
         # rest the ball against the player's body, not at the edge of their
         # control zone -- teleporting it metres away turns crowds into pinball
         self.ball.pos = p.pos + normal * (r.player_radius + r.ball_radius + 0.02)
@@ -570,11 +683,14 @@ class Match:
         b = self.ball.pos
         in_mouth = r.goal_y0 <= b.y <= r.goal_y1
 
-        # a goal counts however the ball got there, dribbled or struck
-        if b.x >= r.length and in_mouth:
+        # A goal counts however the ball got there, dribbled or struck -- but
+        # it has to be under the bar. Anything higher simply carries on over
+        # the goal line and is dealt with as out of play below.
+        under_bar = self.ball.z < r.crossbar_height
+        if b.x >= r.length and in_mouth and under_bar:
             self._score(HOME)
             return
-        if b.x <= 0.0 and in_mouth:
+        if b.x <= 0.0 and in_mouth and under_bar:
             self._score(AWAY)
             return
 
@@ -618,6 +734,7 @@ class Match:
         self.phase_timer = self.rules.goal_celebration
         self.setpiece = None
         self.ball.vel = Vec2()
+        self.ball.vz = 0.0
         self.owner = None
         self._pending_kickoff = 1 - team
 
@@ -679,6 +796,8 @@ class Match:
         ball = BallView(
             pos=pt(self.ball.pos),
             vel=vec(self.ball.vel),
+            height=self.ball.z,  # height is unaffected by mirroring
+            vertical_speed=self.ball.vz,
             owner_index=self.owner.index if self.owner else None,
             owned_by_us=self.owner is not None and self.owner.team == team,
             owned_by_them=self.owner is not None and self.owner.team != team,

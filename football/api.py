@@ -70,8 +70,10 @@ class PlayerView:
 
 @dataclass(frozen=True, slots=True)
 class BallView:
-    pos: Vec2
-    vel: Vec2
+    pos: Vec2  # position on the ground plane
+    vel: Vec2  # horizontal velocity
+    height: float  # metres above the turf; 0.0 when it is on the ground
+    vertical_speed: float  # positive is rising
     owner_index: int | None  # index within the owning team, else None
     owned_by_us: bool
     owned_by_them: bool
@@ -85,15 +87,61 @@ class BallView:
     def speed(self) -> float:
         return self.vel.length()
 
-    def predict(self, seconds: float, friction: float = 0.55) -> Vec2:
-        """Where a rolling ball will be in `seconds` (ignores being tackled)."""
-        import math
+    @property
+    def airborne(self) -> bool:
+        return self.height > 0.0
 
-        if self.speed < 1e-6:
-            return self.pos
-        # integral of v0 * exp(-k t) dt from 0 to s
-        travel = (1.0 - math.exp(-friction * seconds)) / friction
-        return self.pos + self.vel * travel
+    def predict(
+        self,
+        seconds: float,
+        friction: float = 0.55,
+        gravity: float = 9.81,
+        restitution: float = 0.55,
+        air_drag: float = 0.06,
+    ) -> Vec2:
+        """Where the ball will be in `seconds` (ignores anyone touching it).
+
+        Steps the same integration the engine uses, so an airborne ball's
+        bounces are accounted for. Prefer `state.predict_ball()`, which fills
+        these constants in from `state.limits` for you.
+        """
+        pos, vel, z, vz = self.pos, self.vel, self.height, self.vertical_speed
+        dt = 1.0 / 60.0
+        steps = max(0, int(seconds / dt))
+        for _ in range(steps):
+            if z > 0.0 or vz > 0.0:
+                drag = math.exp(-air_drag * dt)
+                vel = vel * drag
+                vz = (vz - gravity * dt) * drag
+            else:
+                vel = vel * math.exp(-friction * dt)
+                if vel.length() < 0.15:
+                    vel = Vec2()
+            pos = pos + vel * dt
+            z += vz * dt
+            if z <= 0.0:
+                z = 0.0
+                if vz < 0.0:
+                    bounce = -vz * restitution
+                    vz = bounce if bounce > 0.7 else 0.0
+                    vel = vel * (1.0 - 0.12 * restitution)
+        return pos
+
+    def predict_height(self, seconds: float, gravity: float = 9.81,
+                       restitution: float = 0.55, air_drag: float = 0.06) -> float:
+        """How high the ball will be in `seconds` -- use it to time a header."""
+        z, vz = self.height, self.vertical_speed
+        dt = 1.0 / 60.0
+        for _ in range(max(0, int(seconds / dt))):
+            if z > 0.0 or vz > 0.0:
+                vz = (vz - gravity * dt) * math.exp(-air_drag * dt)
+            z += vz * dt
+            if z <= 0.0:
+                z = 0.0
+                if vz < 0.0:
+                    bounce = -vz * restitution
+                    vz = bounce if bounce > 0.7 else 0.0
+        return z
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +212,15 @@ class Limits:
     keeper_catch_radius: float
     keeper_catch_max_speed: float
     ball_friction: float
+    # --- aerial ---
+    gravity: float
+    ball_restitution: float
+    air_drag: float
+    max_launch_angle: float  # radians the ball leaves at when lift = 1.0
+    crossbar_height: float
+    reach_foot: float  # you can only trap a ball below this height
+    reach_head: float  # you can still strike one below this
+    reach_keeper: float  # a keeper reaches higher still
 
     def kick_speed(self, power: float) -> float:
         """The speed a kick at `power` leaves your foot."""
@@ -221,11 +278,25 @@ class GameState:
     def can_trap(self, me: PlayerView, margin: float = 1.0) -> bool:
         """True if this player could bring the ball under control right now.
 
-        A ball closing faster than the trap limit rebounds off you instead, so
-        the only way to play it is to strike it.
+        Two ways to fail: the ball is closing faster than the trap limit, or it
+        is simply too high to take down. Either way it rebounds off you instead
+        of settling, so the only way to play it is to strike it.
         """
+        if self.ball.height > self.limits.reach_foot:
+            return False
         cap = self.limits.keeper_trap_speed if me.is_keeper else self.limits.trap_speed
         return (self.ball.vel - me.vel).length() < cap - margin
+
+    def can_reach(self, me: PlayerView) -> bool:
+        """True if the ball is low enough for this player to touch at all."""
+        top = self.limits.reach_keeper if me.is_keeper else self.limits.reach_head
+        return self.ball.height <= top
+
+    def predict_ball(self, seconds: float) -> Vec2:
+        """Where the ball will be in `seconds`, using this match's constants."""
+        lim = self.limits
+        return self.ball.predict(seconds, lim.ball_friction, lim.gravity,
+                                 lim.ball_restitution, lim.air_drag)
 
     @property
     def keeper(self) -> PlayerView:
@@ -301,6 +372,10 @@ class Action:
     sprint: bool = False
     kick: Vec2 | None = None
     kick_power: float = 0.0  # 0..1
+    #: 0 keeps the ball on the deck, 1 launches it at the steepest angle. Loft
+    #: trades horizontal distance for height -- it clears players in the way,
+    #: but the ball cannot be trapped again until it drops back down.
+    lift: float = 0.0  # 0..1
     catch: bool = False  # goalkeeper only, inside your own penalty area
 
     # -- builders -----------------------------------------------------
@@ -323,10 +398,17 @@ class Action:
         return Action(move=direction.clamped(1.0), sprint=sprint)
 
     @staticmethod
-    def kick_to(me: PlayerView, target: Vec2, power: float = 1.0, sprint: bool = False) -> "Action":
-        """Strike the ball towards `target` while holding position."""
+    def kick_to(me: PlayerView, target: Vec2, power: float = 1.0,
+                sprint: bool = False, lift: float = 0.0) -> "Action":
+        """Strike the ball towards `target` while holding position.
+
+        `lift` (0..1) launches it upward: use it to clear a crowd or to loft a
+        pass over a defender. The ball travels less far horizontally for the
+        same power, and cannot be trapped again until it comes down.
+        """
         d = target - me.pos
-        return Action(move=Vec2(), sprint=sprint, kick=d.normalized(), kick_power=_clamp01(power))
+        return Action(move=Vec2(), sprint=sprint, kick=d.normalized(),
+                      kick_power=_clamp01(power), lift=_clamp01(lift))
 
     @staticmethod
     def dribble(me: PlayerView, target: Vec2, power: float = 0.25, sprint: bool = True) -> "Action":
@@ -351,6 +433,7 @@ class Action:
         kick_target: Vec2 | None = None,
         power: float = 1.0,
         sprint: bool = True,
+        lift: float = 0.0,
     ) -> "Action":
         """Run at the ball, and strike it towards `kick_target` on arrival.
 
@@ -361,13 +444,15 @@ class Action:
         a = Action.go_to(me, ball_at, sprint=sprint, arrive=0.0)
         if kick_target is not None:
             a.with_kick(me, kick_target, power)
+            a.lift = _clamp01(lift)
         return a
 
     @staticmethod
-    def pass_to(me: PlayerView, mate: PlayerView, power: float = 0.45, lead: float = 0.35) -> "Action":
+    def pass_to(me: PlayerView, mate: PlayerView, power: float = 0.45,
+                lead: float = 0.35, lift: float = 0.0) -> "Action":
         """Pass to a team-mate, leading them by `lead` seconds of their velocity."""
         target = mate.pos + mate.vel * lead
-        return Action.kick_to(me, target, power)
+        return Action.kick_to(me, target, power, lift=lift)
 
     def with_kick(self, me: PlayerView, target: Vec2, power: float = 1.0) -> "Action":
         d = target - me.pos
@@ -382,6 +467,7 @@ class Action:
         # one player to every other player on the pitch, including opponents.
         self.move = _finite_vec(self.move).clamped(1.0)
         self.kick_power = _clamp01(self.kick_power)
+        self.lift = _clamp01(self.lift)
         if self.kick is not None:
             k = _finite_vec(self.kick).normalized()
             self.kick = k if k.length_sq() > 0 else None

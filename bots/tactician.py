@@ -98,7 +98,10 @@ class Tactician(Team):
             mate = self.best_pass(state, me)
             if mate is not None:
                 return self.send_pass(state, me, mate)
-            return Action.kick_to(me, Vec2(p.length * 0.66, p.width / 2), power=0.85)
+            # no one on: kick downfield, over anyone standing in the way
+            downfield = Vec2(p.length * 0.66, p.width / 2)
+            lift = 0.0 if state.lane_is_clear(me.pos, downfield, corridor=2.0) else 0.45
+            return Action.kick_to(me, downfield, power=0.85, lift=lift)
 
         # come only for a ball we can actually get to first
         mine = me.pos.dist(ball.pos)
@@ -143,7 +146,9 @@ class Tactician(Team):
             return self.send_pass(state, me, mate)
 
         if pressure > 1.6 and me.pos.x < p.length * 0.30:
-            return Action.kick_to(me, Vec2(p.length * 0.82, p.width / 2), power=1.0)
+            escape = Vec2(p.length * 0.82, p.width / 2)
+            lift = 0.0 if state.lane_is_clear(me.pos, escape, corridor=2.0) else 0.45
+            return Action.kick_to(me, escape, power=1.0, lift=lift)
 
         # Carry it into space. The ball follows its owner and a carrier moving
         # away from a challenge is much harder to rob, so sprint -- but go
@@ -174,21 +179,34 @@ class Tactician(Team):
     def ball_winner(self, state, me):
         """Gather if the ball is collectable, otherwise strike it."""
         p, ball = state.pitch, state.ball
-        aim = ball.predict(0.22) if ball.speed > 2.0 else ball.pos
 
+        # For a ball in the air, run to where it will come down rather than to
+        # where it is now -- otherwise you stand under it and watch it sail on.
+        if ball.airborne:
+            aim = state.predict_ball(0.45)
+        elif ball.speed > 2.0:
+            aim = state.predict_ball(0.22)
+        else:
+            aim = ball.pos
+
+        # can_trap now also fails when the ball is above foot height
         if state.can_trap(me):
             return Action.go_to(me, aim, sprint=True, arrive=0.0)
 
-        # Too fast to control: the only option is to hit it. Kicks reach
-        # further than control does, so this also gets there sooner.
+        # Too fast or too high to control: the only option is to hit it.
         if me.pos.x > p.length * 0.62 and self.shot_quality(state, me) > 0.25:
-            target = p.their_goal
+            target, lift = p.their_goal, 0.0  # keep shots down
         elif me.pos.x < p.length * 0.4:
-            target = Vec2(p.length * 0.8, p.width / 2)  # clear it away from goal
+            # Clearing our own third. Loft is for going *over* people, so only
+            # pay its cost -- an airborne ball nobody can trap -- when someone
+            # is actually in the way.
+            target = Vec2(p.length * 0.8, p.width / 2)
+            lift = 0.0 if state.lane_is_clear(me.pos, target, corridor=2.0) else 0.45
         else:
             mate = self.best_pass(state, me)
             target = (mate.pos + mate.vel * 0.3) if mate else p.their_goal
-        return Action.intercept(me, aim, target, power=0.85)
+            lift = 0.0
+        return Action.intercept(me, aim, target, power=0.85, lift=lift)
 
     def off_ball(self, state, me, presser, support):
         p, ball = state.pitch, state.ball

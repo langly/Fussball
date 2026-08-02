@@ -21,7 +21,8 @@ class Chaser(Team):
                 actions[me.index] = a
             else:
                 # run at the ball and hammer it goalwards whenever it is reachable
-                aim = state.ball.predict(0.2) if state.ball.loose else state.ball.pos
+                ball = state.ball
+                aim = state.predict_ball(0.4 if ball.airborne else 0.2) if ball.loose else ball.pos
                 actions[me.index] = Action.intercept(
                     me, aim, state.pitch.their_goal, power=1.0
                 )

@@ -37,8 +37,10 @@ def act(state):
         a.catch = True
         actions[0] = a
     elif keeper.has_ball:
-        # long ball to the striker
-        actions[0] = Action.kick_to(keeper, state.us[4].pos + state.us[4].vel * 0.6, power=0.95)
+        # long ball to the striker, lofted only if someone is actually in the way
+        target = state.us[4].pos + state.us[4].vel * 0.6
+        lift = 0.0 if state.lane_is_clear(keeper.pos, target, corridor=2.0) else 0.45
+        actions[0] = Action.kick_to(keeper, target, power=0.95, lift=lift)
     else:
         y = min(max(ball.pos.y, p.our_post_left.y - 1.0), p.our_post_right.y + 1.0)
         a = Action.go_to(keeper, Vec2(1.8, y), sprint=True)
@@ -50,10 +52,13 @@ def act(state):
         me = state.us[idx]
         y = p.width / 2 + side * 7.5 + (ball.pos.y - p.width / 2) * 0.45
         spot = p.clamp(Vec2(13.0, y), margin=2.0)
+        upfield = Vec2(p.length * 0.82, p.width / 2)
+        lift = 0.0 if state.lane_is_clear(me.pos, upfield, corridor=2.0) else 0.45
         if me.has_ball:
-            actions[idx] = Action.kick_to(me, Vec2(p.length * 0.8, p.width / 2), power=1.0)
+            actions[idx] = Action.kick_to(me, upfield, power=1.0, lift=lift)
         elif ball.pos.x < 26.0 and me.pos.dist(ball.pos) < 11.0:
-            actions[idx] = Action.intercept(me, ball.pos, Vec2(p.length * 0.85, p.width / 2), power=1.0)
+            aim = state.predict_ball(0.45) if ball.airborne else ball.pos
+            actions[idx] = Action.intercept(me, aim, upfield, power=1.0, lift=lift)
         else:
             actions[idx] = Action.go_to(me, spot, sprint=ball.pos.x < 34.0)
 
@@ -68,7 +73,7 @@ def act(state):
         else:
             actions[3] = Action.move_dir((p.their_goal - mid.pos).normalized(), sprint=True)
     else:
-        chase = ball.predict(0.3) if ball.loose else ball.pos
+        chase = state.predict_ball(0.45 if ball.airborne else 0.3) if ball.loose else ball.pos
         if state.can_trap(mid) and mid.pos.dist(ball.pos) < 14.0:
             actions[3] = Action.go_to(mid, chase, sprint=True, arrive=0.0)
         else:
